@@ -1,0 +1,80 @@
+name: Build and Publish NuGet Package
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v[0-9]+.[0-9]+.[0-9]+'
+
+jobs:
+  publish:
+    name: Build, Pack, and Publish
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '8.0.x'
+
+      - name: Configure GitHub Packages source
+        run: |
+          dotnet nuget add source \
+            "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" \
+            --name "github" \
+            --username "${{ github.repository_owner }}" \
+            --password "${{ secrets.GITHUB_TOKEN }}" \
+            --store-password-in-clear-text
+
+      # Derive a semver from the tag (vX.Y.Z → X.Y.Z); fall back to 1.0.0 on branch pushes.
+      - name: Determine package version
+        id: version
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION="1.0.0"
+          fi
+          echo "VERSION=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Restore dependencies
+        run: dotnet restore src/mdz-core/mdz-core.csproj
+
+      - name: Build
+        run: |
+          dotnet build src/mdz-core/mdz-core.csproj \
+            --configuration Release \
+            --no-restore \
+            /p:Version=${{ steps.version.outputs.VERSION }}
+
+      # Run tests only if a test project exists under src/ or tests/.
+      - name: Test
+        run: |
+          TEST_PROJ=$(find src tests -name '*Tests.csproj' 2>/dev/null | head -1)
+          if [ -n "${TEST_PROJ}" ]; then
+            dotnet test --configuration Release --no-build
+          else
+            echo "No test projects found – skipping."
+          fi
+
+      - name: Pack
+        run: |
+          dotnet pack src/mdz-core/mdz-core.csproj \
+            --configuration Release \
+            --no-build \
+            -o out \
+            /p:Version=${{ steps.version.outputs.VERSION }}
+
+      - name: Publish to GitHub Packages
+        run: |
+          dotnet nuget push out/*.nupkg \
+            --source "github" \
+            --api-key ${{ secrets.GITHUB_TOKEN }} \
+            --skip-duplicate
