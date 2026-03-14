@@ -1,0 +1,78 @@
+name: Build and Publish
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+env:
+  DOTNET_VERSION: '8.0.x'
+  SOLUTION_PATH: mdz-core.slnx
+  PROJECT_PATH: src/mdz-core/mdz-core.csproj
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: ${{ env.DOTNET_VERSION }}
+
+      - name: Compute package version
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          else
+            VERSION="0.1.${GITHUB_RUN_NUMBER}"
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "Using package version: ${VERSION}"
+
+      - name: Configure GitHub Packages source
+        run: |
+          dotnet nuget add source \
+            "https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json" \
+            --name "github" \
+            --username "${{ github.actor }}" \
+            --password "${{ secrets.GITHUB_TOKEN }}" \
+            --store-password-in-clear-text
+
+      - name: Restore
+        run: dotnet restore ${{ env.SOLUTION_PATH }}
+
+      - name: Build
+        run: dotnet build ${{ env.SOLUTION_PATH }} --configuration Release --no-restore
+
+      - name: Detect test projects
+        id: tests
+        shell: bash
+        run: |
+          if find . -type f -name "*Tests*.csproj" | grep -q .; then
+            echo "has_tests=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_tests=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Test
+        if: steps.tests.outputs.has_tests == 'true'
+        run: dotnet test ${{ env.SOLUTION_PATH }} --configuration Release --no-build
+
+      - name: Pack
+        run: dotnet pack ${{ env.PROJECT_PATH }} --configuration Release -o out -p:Version=${{ steps.version.outputs.version }} --no-build
+
+      - name: Publish package to GitHub Packages
+        run: dotnet nuget push out/*.nupkg --source "github" --api-key ${{ secrets.GITHUB_TOKEN }} --skip-duplicate

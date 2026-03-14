@@ -1,0 +1,26 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+
+    <AssemblyName>mdz.core</AssemblyName>
+    <RootNamespace>Mdz.Core</RootNamespace>
+
+    <PackageId>mdz-core</PackageId>
+    <Description>Core library assembly for the .mdz format.</Description>
+    <Authors>mdz</Authors>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <RepositoryUrl>https://github.com/kylemwhite/mdz-core</RepositoryUrl>
+
+    <!-- Version placeholders: override in CI via /p:Version=... -->
+    <Version>0.1.0</Version>
+    <PackageVersion>$(Version)</PackageVersion>
+
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" Link="README.md" />
+  </ItemGroup>
+</Project>

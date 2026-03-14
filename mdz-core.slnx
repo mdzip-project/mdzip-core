@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/mdz-core/mdz-core.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/mdz-core.Tests/mdz-core.Tests.csproj" />
+  </Folder>
+</Solution>
