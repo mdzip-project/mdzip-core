@@ -1,0 +1,33 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Target framework -->
+    <TargetFramework>net8.0</TargetFramework>
+
+    <!-- Package identity -->
+    <PackageId>mdz-core</PackageId>
+    <AssemblyName>mdz-core</AssemblyName>
+    <RootNamespace>MdzCore</RootNamespace>
+
+    <!-- Versioning – override via /p:Version=x.y.z at build time or update here -->
+    <Version>1.0.0</Version>
+    <AssemblyVersion>1.0.0.0</AssemblyVersion>
+    <FileVersion>1.0.0.0</FileVersion>
+
+    <!-- Package metadata -->
+    <Authors>Your Name</Authors>
+    <Company>Your Company</Company>
+    <Description>Core library assembly for the .mdz format.</Description>
+    <RepositoryUrl>https://github.com/kylemwhite/mdz-core</RepositoryUrl>
+    <RepositoryType>git</RepositoryType>
+
+    <!-- Do NOT auto-pack on every build; packing is done explicitly in CI -->
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+
+    <!-- Deterministic builds and nullable reference types -->
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+
+</Project>
