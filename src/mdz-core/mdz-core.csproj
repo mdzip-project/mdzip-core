@@ -13,8 +13,8 @@
     <PackageReadmeFile>README.md</PackageReadmeFile>
     <RepositoryUrl>https://github.com/kylemwhite/mdz-core</RepositoryUrl>
 
-    <!-- Version placeholders: override in CI via /p:Version=... -->
-    <Version>0.1.0</Version>
+    <!-- Package version is pinned to the supported markdownzip spec version. -->
+    <Version>1.0.1-draft</Version>
     <PackageVersion>$(Version)</PackageVersion>
 
     <GeneratePackageOnBuild>false</GeneratePackageOnBuild>

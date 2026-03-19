@@ -5,7 +5,7 @@ on:
     branches:
       - main
     tags:
-      - 'v*.*.*'
+      - 'v*'
   workflow_dispatch:
 
 permissions:
@@ -30,17 +30,28 @@ jobs:
         with:
           dotnet-version: ${{ env.DOTNET_VERSION }}
 
-      - name: Compute package version
+      - name: Read project version
         id: version
         shell: bash
         run: |
-          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
-            VERSION="${GITHUB_REF#refs/tags/v}"
-          else
-            VERSION="0.1.${GITHUB_RUN_NUMBER}"
+          VERSION="$(grep -oPm1 '(?<=<Version>)[^<]+' "${{ env.PROJECT_PATH }}")"
+          if [[ -z "$VERSION" ]]; then
+            echo "Failed to read <Version> from ${{ env.PROJECT_PATH }}"
+            exit 1
           fi
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "Using package version: ${VERSION}"
+
+      - name: Validate tag matches project version
+        if: startsWith(github.ref, 'refs/tags/v')
+        shell: bash
+        run: |
+          TAG_VERSION="${GITHUB_REF#refs/tags/v}"
+          PROJECT_VERSION="${{ steps.version.outputs.version }}"
+          if [[ "$TAG_VERSION" != "$PROJECT_VERSION" ]]; then
+            echo "Tag version '$TAG_VERSION' does not match project version '$PROJECT_VERSION'."
+            exit 1
+          fi
 
       - name: Configure GitHub Packages source
         run: |
