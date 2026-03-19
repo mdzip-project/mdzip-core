@@ -12,7 +12,7 @@ public class SpecConformanceTests
             ["index.md"] = "# Hello",
             ["manifest.json"] = """
             {
-              "mdz": "1.0.0",
+              "spec": { "version": "1.0.1" },
               "title": "Doc",
               "entryPoint": "index.md",
               "cover": "assets/images/cover.png"
@@ -33,14 +33,14 @@ public class SpecConformanceTests
     }
 
     [Fact]
-    public void Validate_AllowsLowerManifestMajorVersionWithWarning()
+    public void Validate_AllowsLowerSpecMajorVersionWithWarning()
     {
         var archive = TestFixtureHelper.CreateTempArchive(new Dictionary<string, string>
         {
             ["index.md"] = "# Hello",
             ["manifest.json"] = """
             {
-              "mdz": "0.9.0",
+              "spec": { "version": "0.9.0" },
               "title": "Doc",
               "entryPoint": "index.md"
             }
@@ -51,7 +51,7 @@ public class SpecConformanceTests
         {
             var result = MdzArchive.Validate(archive);
             Assert.True(result.IsValid);
-            Assert.Contains(result.Warnings, w => w.Contains("mdz", StringComparison.OrdinalIgnoreCase));
+            Assert.Contains(result.Warnings, w => w.Contains("spec.version", StringComparison.OrdinalIgnoreCase));
         }
         finally
         {
@@ -60,14 +60,14 @@ public class SpecConformanceTests
     }
 
     [Fact]
-    public void Validate_RejectsHigherManifestMajorVersion()
+    public void Validate_RejectsHigherSpecMajorVersion()
     {
         var archive = TestFixtureHelper.CreateTempArchive(new Dictionary<string, string>
         {
             ["index.md"] = "# Hello",
             ["manifest.json"] = """
             {
-              "mdz": "2.0.0",
+              "spec": { "version": "2.0.0" },
               "title": "Doc",
               "entryPoint": "index.md"
             }
@@ -94,7 +94,7 @@ public class SpecConformanceTests
             ["index.md"] = "# Hello",
             ["manifest.json"] = """
             {
-              "mdz": "1.0.0",
+              "spec": { "version": "1.0.1" },
               "entryPoint": "index.md"
             }
             """
@@ -104,6 +104,85 @@ public class SpecConformanceTests
         {
             var result = MdzArchive.Validate(archive);
             Assert.True(result.IsValid);
+        }
+        finally
+        {
+            File.Delete(archive);
+        }
+    }
+
+    [Fact]
+    public void Validate_AllowsManifestWithoutSpecVersionAndWarns()
+    {
+        var archive = TestFixtureHelper.CreateTempArchive(new Dictionary<string, string>
+        {
+            ["index.md"] = "# Hello",
+            ["manifest.json"] = """
+            {
+              "entryPoint": "index.md"
+            }
+            """
+        });
+
+        try
+        {
+            var result = MdzArchive.Validate(archive);
+            Assert.True(result.IsValid);
+            Assert.Contains(result.Warnings, w => w.Contains("spec.version", StringComparison.OrdinalIgnoreCase));
+        }
+        finally
+        {
+            File.Delete(archive);
+        }
+    }
+
+    [Fact]
+    public void Validate_AcceptsCreatedAndModifiedObjectFormWithWhen()
+    {
+        var archive = TestFixtureHelper.CreateTempArchive(new Dictionary<string, string>
+        {
+            ["index.md"] = "# Hello",
+            ["manifest.json"] = """
+            {
+              "spec": { "version": "1.0.1" },
+              "entryPoint": "index.md",
+              "created": { "when": "2026-03-16T00:00:00Z", "by": { "name": "A" } },
+              "modified": { "when": "2026-03-16T01:00:00Z" }
+            }
+            """
+        });
+
+        try
+        {
+            var result = MdzArchive.Validate(archive);
+            Assert.True(result.IsValid);
+        }
+        finally
+        {
+            File.Delete(archive);
+        }
+    }
+
+    [Fact]
+    public void Validate_RejectsCreatedObjectWithoutWhen()
+    {
+        var archive = TestFixtureHelper.CreateTempArchive(new Dictionary<string, string>
+        {
+            ["index.md"] = "# Hello",
+            ["manifest.json"] = """
+            {
+              "spec": { "version": "1.0.1" },
+              "entryPoint": "index.md",
+              "created": { "by": { "name": "A" } }
+            }
+            """
+        });
+
+        try
+        {
+            var result = MdzArchive.Validate(archive);
+            Assert.False(result.IsValid);
+            Assert.Contains(result.Errors, e => e.Contains("created", StringComparison.OrdinalIgnoreCase));
         }
         finally
         {

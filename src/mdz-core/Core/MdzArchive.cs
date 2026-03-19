@@ -1,6 +1,7 @@
 using System.IO.Compression;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
 using Mdz.Models;
 
@@ -22,6 +23,8 @@ public sealed class ValidationResult
 public static class MdzArchive
 {
     private const string ManifestFileName = "manifest.json";
+    private const string SpecName = "markdownzip-spec";
+    private const string ProducedSpecVersion = "1.0.1-draft";
     private const int SupportedMajorVersion = 1;
     private static readonly Regex SemVerRegex = new(
         @"^(?<major>0|[1-9]\d*)\.(?<minor>0|[1-9]\d*)\.(?<patch>0|[1-9]\d*)(?:-(?<prerelease>(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+(?<build>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$",
@@ -101,6 +104,9 @@ public static class MdzArchive
             // Write manifest last (if provided)
             if (manifest is not null)
             {
+                manifest.Spec ??= new ManifestSpec();
+                manifest.Spec.Name ??= SpecName;
+                manifest.Spec.Version ??= ProducedSpecVersion;
                 manifest.Created ??= DateTime.UtcNow.ToString("o");
                 manifest.Modified = DateTime.UtcNow.ToString("o");
 
@@ -166,6 +172,9 @@ public static class MdzArchive
 
             if (manifest is not null)
             {
+                manifest.Spec ??= new ManifestSpec();
+                manifest.Spec.Name ??= SpecName;
+                manifest.Spec.Version ??= ProducedSpecVersion;
                 manifest.Created ??= DateTime.UtcNow.ToString("o");
                 manifest.Modified = DateTime.UtcNow.ToString("o");
 
@@ -180,6 +189,136 @@ public static class MdzArchive
                 var bytes = Encoding.UTF8.GetBytes(json);
                 ms.Write(bytes, 0, bytes.Length);
             }
+        });
+    }
+
+    // -------------------------------------------------------------------------
+    // Update (in-place)
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Adds a file to an existing .mdz archive or replaces an existing entry at the same archive path.
+    /// </summary>
+    public static void AddFile(string archivePath, string archiveEntryPath, string localFilePath)
+    {
+        if (!File.Exists(archivePath))
+            throw new FileNotFoundException($"Archive '{archivePath}' does not exist.", archivePath);
+
+        if (!File.Exists(localFilePath))
+            throw new FileNotFoundException($"Source file '{localFilePath}' does not exist.", localFilePath);
+
+        var normalisedPath = archiveEntryPath.Replace(Path.DirectorySeparatorChar, '/');
+        var pathError = PathValidator.Validate(normalisedPath);
+        if (pathError is not null)
+            throw new InvalidOperationException($"Invalid path '{normalisedPath}': {pathError}");
+
+        CreateAtomic(archivePath, destinationArchive =>
+        {
+            using var sourceArchive = ZipFile.OpenRead(archivePath);
+            var existingPaths = sourceArchive.Entries
+                .Where(e => !string.IsNullOrEmpty(e.Name))
+                .Select(e => e.FullName.Replace('\\', '/'))
+                .Where(p => !p.Equals(normalisedPath, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            existingPaths.Add(normalisedPath);
+
+            var manifest = ReadManifestFromArchive(
+                sourceArchive,
+                normalisedPath,
+                localFilePath,
+                requireValidReplacementManifest: true,
+                requireValidExistingManifest: true);
+            EnsureCreatableEntryPoint(existingPaths, manifest);
+            var refreshedManifestJson = normalisedPath.Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase)
+                ? null
+                : TryRefreshManifestModifiedJson(sourceArchive);
+
+            foreach (var sourceEntry in sourceArchive.Entries.Where(e => !string.IsNullOrEmpty(e.Name)))
+            {
+                var sourcePath = sourceEntry.FullName.Replace('\\', '/');
+                if (sourcePath.Equals(normalisedPath, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (refreshedManifestJson is not null
+                    && sourcePath.Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                CopyEntry(sourceEntry, destinationArchive);
+            }
+
+            if (normalisedPath.Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase))
+            {
+                if (manifest is null)
+                    throw new InvalidOperationException("Replacement manifest.json is invalid: expected a JSON object.");
+
+                // Use raw JSON so that created.by / modified.by subobjects are preserved.
+                var rawJson = File.ReadAllText(localFilePath, Encoding.UTF8);
+                WriteManifestEntry(destinationArchive, PrepareReplacementManifestJson(rawJson));
+            }
+            else
+            {
+                WriteFileEntry(destinationArchive, normalisedPath, localFilePath);
+                if (refreshedManifestJson is not null)
+                    WriteManifestEntry(destinationArchive, refreshedManifestJson);
+            }
+        });
+    }
+
+    /// <summary>
+    /// Removes a file from an existing .mdz archive.
+    /// </summary>
+    public static void RemoveFile(string archivePath, string archiveEntryPath)
+    {
+        if (!File.Exists(archivePath))
+            throw new FileNotFoundException($"Archive '{archivePath}' does not exist.", archivePath);
+
+        var normalisedPath = archiveEntryPath.Replace(Path.DirectorySeparatorChar, '/');
+        var pathError = PathValidator.Validate(normalisedPath);
+        if (pathError is not null)
+            throw new InvalidOperationException($"Invalid path '{normalisedPath}': {pathError}");
+
+        CreateAtomic(archivePath, destinationArchive =>
+        {
+            using var sourceArchive = ZipFile.OpenRead(archivePath);
+
+            var sourceEntries = sourceArchive.Entries
+                .Where(e => !string.IsNullOrEmpty(e.Name))
+                .ToList();
+
+            var entryToRemove = sourceEntries.FirstOrDefault(e =>
+                e.FullName.Replace('\\', '/').Equals(normalisedPath, StringComparison.OrdinalIgnoreCase));
+            if (entryToRemove is null)
+                throw new FileNotFoundException($"Entry '{normalisedPath}' was not found in archive.", normalisedPath);
+
+            var remainingPaths = sourceEntries
+                .Select(e => e.FullName.Replace('\\', '/'))
+                .Where(p => !p.Equals(normalisedPath, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            var manifest = ReadManifestFromArchive(
+                sourceArchive,
+                normalisedPath,
+                localManifestPath: null,
+                requireValidReplacementManifest: false,
+                requireValidExistingManifest: true);
+            EnsureCreatableEntryPoint(remainingPaths, manifest);
+            var refreshedManifestJson = normalisedPath.Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase)
+                ? null
+                : TryRefreshManifestModifiedJson(sourceArchive);
+
+            foreach (var sourceEntry in sourceEntries)
+            {
+                var sourcePath = sourceEntry.FullName.Replace('\\', '/');
+                if (sourcePath.Equals(normalisedPath, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (refreshedManifestJson is not null
+                    && sourcePath.Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                CopyEntry(sourceEntry, destinationArchive);
+            }
+
+            if (refreshedManifestJson is not null)
+                WriteManifestEntry(destinationArchive, refreshedManifestJson);
         });
     }
 
@@ -368,10 +507,15 @@ public static class MdzArchive
             var manifestEntry = FindEntry(archive, ManifestFileName);
             if (manifestEntry is not null)
             {
+                JsonElement? manifestRoot = null;
                 try
                 {
                     using var stream = manifestEntry.Open();
-                    manifest = JsonSerializer.Deserialize<Manifest>(stream, JsonOptions);
+                    using var reader = new StreamReader(stream, Encoding.UTF8);
+                    var manifestText = reader.ReadToEnd();
+                    using var manifestJson = JsonDocument.Parse(manifestText);
+                    manifestRoot = manifestJson.RootElement.Clone();
+                    manifest = JsonSerializer.Deserialize<Manifest>(manifestText, JsonOptions);
                 }
                 catch (JsonException ex)
                 {
@@ -385,20 +529,27 @@ public static class MdzArchive
                 }
                 else
                 {
-                    // Required fields
-                    if (string.IsNullOrWhiteSpace(manifest.Mdz))
-                        errors.Add("ERR_MANIFEST_INVALID: manifest.json is missing required field 'mdz'.");
+                    if (manifestRoot is not null)
+                    {
+                        ValidateDraftTimestampField(manifestRoot.Value, "created", errors);
+                        ValidateDraftTimestampField(manifestRoot.Value, "modified", errors);
+                    }
+
+                    if (string.IsNullOrWhiteSpace(manifest.Spec?.Version))
+                    {
+                        warnings.Add("manifest 'spec.version' is missing; version metadata is unavailable.");
+                    }
                     else
                     {
                         // Validate SemVer 2.0.0 and enforce major-version compatibility:
                         // - reject higher unsupported major versions
                         // - allow lower major versions with a warning
-                        if (!TryParseSemVerMajor(manifest.Mdz, out var major))
-                            errors.Add($"ERR_MANIFEST_INVALID: 'mdz' field '{manifest.Mdz}' is not a valid semver string.");
+                        if (!TryParseSemVerMajor(manifest.Spec.Version, out var major))
+                            errors.Add($"ERR_MANIFEST_INVALID: 'spec.version' field '{manifest.Spec.Version}' is not a valid semver string.");
                         else if (major > SupportedMajorVersion)
-                            errors.Add($"ERR_VERSION_UNSUPPORTED: manifest 'mdz' major version {major} is not supported (supported: {SupportedMajorVersion}).");
+                            errors.Add($"ERR_VERSION_UNSUPPORTED: manifest 'spec.version' major version {major} is not supported (supported: {SupportedMajorVersion}).");
                         else if (major < SupportedMajorVersion)
-                            warnings.Add($"manifest 'mdz' major version {major} is older than supported major {SupportedMajorVersion}.");
+                            warnings.Add($"manifest 'spec.version' major version {major} is older than supported major {SupportedMajorVersion}.");
                     }
 
                     if (manifest.Title is not null && string.IsNullOrWhiteSpace(manifest.Title))
@@ -535,6 +686,203 @@ public static class MdzArchive
 
     private static string NormaliseLf(string content) =>
         content.Replace("\r\n", "\n").Replace("\r", "\n");
+
+    private static Manifest? ReadManifestFromArchive(
+        ZipArchive archive,
+        string replacedOrRemovedPath,
+        string? localManifestPath,
+        bool requireValidReplacementManifest,
+        bool requireValidExistingManifest)
+    {
+        if (replacedOrRemovedPath.Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase))
+        {
+            if (localManifestPath is null)
+                return null;
+
+            try
+            {
+                var manifestText = File.ReadAllText(localManifestPath, Encoding.UTF8);
+                using var _ = JsonDocument.Parse(manifestText); // Must be valid JSON if manifest.json is present.
+                var manifest = JsonSerializer.Deserialize<Manifest>(manifestText, JsonOptions);
+                if (manifest is null)
+                {
+                    if (requireValidReplacementManifest)
+                        throw new InvalidOperationException("Replacement manifest.json is invalid: expected a JSON object.");
+
+                    return null;
+                }
+
+                return manifest;
+            }
+            catch (JsonException)
+            {
+                if (requireValidReplacementManifest)
+                    throw new InvalidOperationException("Replacement manifest.json is invalid JSON.");
+
+                return null;
+            }
+        }
+
+        var manifestEntry = FindEntry(archive, ManifestFileName);
+        if (manifestEntry is null)
+            return null;
+
+        try
+        {
+            using var stream = manifestEntry.Open();
+            var manifest = JsonSerializer.Deserialize<Manifest>(stream, JsonOptions);
+            if (manifest is null && requireValidExistingManifest)
+                throw new InvalidOperationException("Existing manifest.json is invalid: expected a JSON object.");
+
+            return manifest;
+        }
+        catch (JsonException)
+        {
+            if (requireValidExistingManifest)
+                throw new InvalidOperationException("Existing manifest.json is invalid JSON.");
+
+            return null;
+        }
+    }
+
+    private static void CopyEntry(ZipArchiveEntry sourceEntry, ZipArchive destinationArchive)
+    {
+        var path = sourceEntry.FullName.Replace('\\', '/');
+        var destinationEntry = destinationArchive.CreateEntry(path, CompressionLevel.Optimal);
+        using var source = sourceEntry.Open();
+        using var destination = destinationEntry.Open();
+        source.CopyTo(destination);
+    }
+
+    private static void WriteFileEntry(ZipArchive archive, string archivePath, string localFilePath)
+    {
+        var entry = archive.CreateEntry(archivePath, CompressionLevel.Optimal);
+        using var entryStream = entry.Open();
+
+        if (IsTextFile(archivePath))
+        {
+            var content = File.ReadAllText(localFilePath, Encoding.UTF8);
+            content = NormaliseLf(content);
+            var bytes = Encoding.UTF8.GetBytes(content);
+            entryStream.Write(bytes, 0, bytes.Length);
+            return;
+        }
+
+        using var fileStream = File.OpenRead(localFilePath);
+        fileStream.CopyTo(entryStream);
+    }
+
+    /// <summary>
+    /// Prepares raw manifest JSON for writing: injects spec metadata and refreshes timestamps
+    /// using raw JSON manipulation to preserve fields like created.by / modified.by.
+    /// </summary>
+    private static string PrepareReplacementManifestJson(string rawJson)
+    {
+        var node = JsonNode.Parse(rawJson) as JsonObject
+            ?? throw new InvalidOperationException("Replacement manifest.json is invalid: expected a JSON object.");
+
+        if (node["spec"] is not JsonObject specNode)
+        {
+            specNode = [];
+            node["spec"] = specNode;
+        }
+        if (specNode["name"] is null) specNode["name"] = SpecName;
+        if (specNode["version"] is null) specNode["version"] = ProducedSpecVersion;
+
+        if (node["created"] is null)
+            node["created"] = DateTime.UtcNow.ToString("o");
+
+        var now = DateTime.UtcNow.ToString("o");
+        if (node["modified"] is JsonObject modifiedObj)
+            modifiedObj["when"] = now;
+        else
+            node["modified"] = now;
+
+        return node.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
+    }
+
+    private static void WriteManifestEntry(ZipArchive archive, string manifestJson)
+    {
+        var manifestEntry = archive.CreateEntry(ManifestFileName, CompressionLevel.Optimal);
+        using var stream = manifestEntry.Open();
+        var normalised = NormaliseLf(manifestJson);
+        var bytes = Encoding.UTF8.GetBytes(normalised);
+        stream.Write(bytes, 0, bytes.Length);
+    }
+
+    private static string? TryRefreshManifestModifiedJson(ZipArchive archive)
+    {
+        var manifestEntry = FindEntry(archive, ManifestFileName);
+        if (manifestEntry is null)
+            return null;
+
+        try
+        {
+            using var stream = manifestEntry.Open();
+            using var reader = new StreamReader(stream, Encoding.UTF8);
+            var json = reader.ReadToEnd();
+            var node = JsonNode.Parse(json) as JsonObject;
+            if (node is null)
+                return null;
+
+            var now = DateTime.UtcNow.ToString("o");
+            if (node["modified"] is JsonObject modifiedObject)
+            {
+                modifiedObject["when"] = now;
+            }
+            else
+            {
+                node["modified"] = now;
+            }
+
+            // Ensure spec.version is present (required when a conforming producer emits a manifest).
+            if (node["spec"] is not JsonObject specNode)
+            {
+                specNode = [];
+                node["spec"] = specNode;
+            }
+            if (specNode["name"] is null) specNode["name"] = SpecName;
+            if (specNode["version"] is null) specNode["version"] = ProducedSpecVersion;
+
+            return node.ToJsonString(new JsonSerializerOptions
+            {
+                WriteIndented = true,
+            });
+        }
+        catch (JsonException)
+        {
+            return null;
+        }
+    }
+
+    private static void ValidateDraftTimestampField(JsonElement manifestRoot, string fieldName, ICollection<string> errors)
+    {
+        if (!manifestRoot.TryGetProperty(fieldName, out var value))
+            return;
+
+        if (value.ValueKind == JsonValueKind.String)
+            return;
+
+        if (value.ValueKind == JsonValueKind.Object)
+        {
+            if (!value.TryGetProperty("when", out var when)
+                || when.ValueKind != JsonValueKind.String
+                || string.IsNullOrWhiteSpace(when.GetString()))
+            {
+                errors.Add($"ERR_MANIFEST_INVALID: manifest field '{fieldName}' object form must include string property 'when'.");
+            }
+
+            return;
+        }
+
+        if (value.ValueKind == JsonValueKind.Null)
+        {
+            errors.Add($"ERR_MANIFEST_INVALID: manifest field '{fieldName}' must be a string or an object with 'when', not null.");
+            return;
+        }
+
+        errors.Add($"ERR_MANIFEST_INVALID: manifest field '{fieldName}' must be a string or an object with 'when'.");
+    }
 
     private static void CreateAtomic(string outputPath, Action<ZipArchive> writeArchive)
     {

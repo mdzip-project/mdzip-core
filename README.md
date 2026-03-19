@@ -39,7 +39,7 @@ MdzArchive.Create(
     sourceDirectory: "content",
     manifest: new Manifest
     {
-        Mdz = "1.0.0",
+        Spec = new ManifestSpec { Name = "markdownzip-spec", Version = "1.0.1-draft" },
         Title = "My Document",
         EntryPoint = "index.md"
     });
@@ -51,6 +51,12 @@ Console.WriteLine(result.IsValid);
 // List entries
 var files = MdzArchive.List("book.mdz");
 
+// Add or replace a file in-place
+MdzArchive.AddFile("book.mdz", "assets/notes.txt", "local-notes.txt");
+
+// Remove a file in-place
+MdzArchive.RemoveFile("book.mdz", "assets/old-image.png");
+
 // Extract
 MdzArchive.Extract("book.mdz", "out");
 ```
@@ -59,6 +65,8 @@ MdzArchive.Extract("book.mdz", "out");
 `MdzArchive`:
 - `Create(string outputPath, string sourceDirectory, Manifest? manifest = null)`
 - `CreateFromFiles(string outputPath, IEnumerable<(string ArchivePath, string LocalPath)> files, Manifest? manifest = null)`
+- `AddFile(string archivePath, string archiveEntryPath, string localFilePath)`
+- `RemoveFile(string archivePath, string archiveEntryPath)`
 - `Extract(string archivePath, string destinationDirectory)`
 - `List(string archivePath)`
 - `ListDetailed(string archivePath)`
@@ -70,12 +78,12 @@ Additional types:
 - `ValidationResult`
 - `ArchiveEntry`
 - `PathValidator`
-- `Manifest`, `Author`, `ManifestFile`
+- `Manifest`, `ManifestSpec`, `ManifestAuthor`, `ManifestProducer`, `ManifestAgent`, `ManifestFile`
 
 ## Notes on Validation Behavior
 - Entry paths are validated for traversal attempts and OS-reserved characters.
 - `manifest.json` is optional, but if present it is parsed and validated.
-- Supported manifest `mdz` major version is `1`.
+- Supported manifest `spec.version` major version is `1` (when present).
 - Entry point resolution order:
 1. `manifest.entryPoint`
 2. root `index.md`

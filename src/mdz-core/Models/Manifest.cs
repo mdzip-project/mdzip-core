@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace Mdz.Models;
@@ -8,14 +9,13 @@ namespace Mdz.Models;
 public sealed class Manifest
 {
     /// <summary>
-    /// The version of the MDZ specification the file conforms to. REQUIRED when manifest is present.
-    /// Must be a Semantic Versioning 2.0.0 string.
+    /// Specification compatibility metadata.
     /// </summary>
-    [JsonPropertyName("mdz")]
-    public string? Mdz { get; set; }
+    [JsonPropertyName("spec")]
+    public ManifestSpec? Spec { get; set; }
 
     /// <summary>
-    /// The human-readable title of the document. REQUIRED when manifest is present.
+    /// The human-readable title of the document.
     /// </summary>
     [JsonPropertyName("title")]
     public string? Title { get; set; }
@@ -33,10 +33,28 @@ public sealed class Manifest
     public string? Language { get; set; }
 
     /// <summary>
-    /// An array of author objects.
+    /// Producer provenance metadata.
+    /// </summary>
+    [JsonPropertyName("producer")]
+    public ManifestProducer? Producer { get; set; }
+
+    /// <summary>
+    /// Human/content author attribution metadata.
+    /// </summary>
+    [JsonPropertyName("author")]
+    public ManifestAuthor? Author { get; set; }
+
+    /// <summary>
+    /// Legacy pre-1.0.1 field retained for backwards compatibility.
+    /// </summary>
+    [JsonPropertyName("mdz")]
+    public string? LegacyMdz { get; set; }
+
+    /// <summary>
+    /// Legacy pre-1.0.1 field retained for backwards compatibility.
     /// </summary>
     [JsonPropertyName("authors")]
-    public List<Author>? Authors { get; set; }
+    public List<ManifestAuthor>? Authors { get; set; }
 
     /// <summary>
     /// A short plain-text description of the document.
@@ -52,14 +70,18 @@ public sealed class Manifest
 
     /// <summary>
     /// The creation datetime of the document in ISO 8601 format.
+    /// Draft 1.0.x accepts either a string timestamp or an object containing "when".
     /// </summary>
     [JsonPropertyName("created")]
+    [JsonConverter(typeof(TimestampStringOrObjectConverter))]
     public string? Created { get; set; }
 
     /// <summary>
     /// The last-modified datetime of the document in ISO 8601 format.
+    /// Draft 1.0.x accepts either a string timestamp or an object containing "when".
     /// </summary>
     [JsonPropertyName("modified")]
+    [JsonConverter(typeof(TimestampStringOrObjectConverter))]
     public string? Modified { get; set; }
 
     /// <summary>
@@ -85,18 +107,66 @@ public sealed class Manifest
     /// </summary>
     [JsonPropertyName("files")]
     public List<ManifestFile>? Files { get; set; }
+
+    /// <summary>
+    /// Additional user-defined manifest fields. Consumers must ignore unknown fields.
+    /// </summary>
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? AdditionalFields { get; set; }
+}
+
+/// <summary>
+/// Represents the optional spec block in the manifest.
+/// </summary>
+public sealed class ManifestSpec
+{
+    [JsonPropertyName("name")]
+    public string? Name { get; set; }
+
+    [JsonPropertyName("version")]
+    public string? Version { get; set; }
+}
+
+/// <summary>
+/// Represents a producer block in the manifest.
+/// </summary>
+public sealed class ManifestProducer
+{
+    [JsonPropertyName("application")]
+    public ManifestAgent? Application { get; set; }
+
+    [JsonPropertyName("core")]
+    public ManifestAgent? Core { get; set; }
+}
+
+/// <summary>
+/// Represents an application/core metadata node.
+/// </summary>
+public sealed class ManifestAgent
+{
+    [JsonPropertyName("name")]
+    public string? Name { get; set; }
+
+    [JsonPropertyName("version")]
+    public string? Version { get; set; }
+
+    [JsonPropertyName("url")]
+    public string? Url { get; set; }
 }
 
 /// <summary>
 /// Represents an author entry in the manifest.
 /// </summary>
-public sealed class Author
+public sealed class ManifestAuthor
 {
     [JsonPropertyName("name")]
     public string? Name { get; set; }
 
     [JsonPropertyName("email")]
     public string? Email { get; set; }
+
+    [JsonPropertyName("url")]
+    public string? Url { get; set; }
 }
 
 /// <summary>
@@ -121,4 +191,36 @@ public sealed class ManifestFile
     /// </summary>
     [JsonPropertyName("title")]
     public string? Title { get; set; }
+}
+
+internal sealed class TimestampStringOrObjectConverter : JsonConverter<string?>
+{
+    public override string? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)
+    {
+        if (reader.TokenType == JsonTokenType.Null)
+            return null;
+
+        if (reader.TokenType == JsonTokenType.String)
+            return reader.GetString();
+
+        if (reader.TokenType == JsonTokenType.StartObject)
+        {
+            using var document = JsonDocument.ParseValue(ref reader);
+            if (document.RootElement.TryGetProperty("when", out var when) && when.ValueKind == JsonValueKind.String)
+                return when.GetString();
+
+            return null;
+        }
+
+        using var _ = JsonDocument.ParseValue(ref reader);
+        return null;
+    }
+
+    public override void Write(Utf8JsonWriter writer, string? value, JsonSerializerOptions options)
+    {
+        if (value is null)
+            writer.WriteNullValue();
+        else
+            writer.WriteStringValue(value);
+    }
 }
