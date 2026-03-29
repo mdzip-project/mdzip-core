@@ -11,7 +11,7 @@
     <Description>Core library assembly for the .mdz format.</Description>
     <Authors>mdz</Authors>
     <PackageReadmeFile>README.md</PackageReadmeFile>
-    <RepositoryUrl>https://github.com/kylemwhite/mdz-core</RepositoryUrl>
+    <RepositoryUrl>https://github.com/mdzip-project/mdz-core</RepositoryUrl>
 
     <!-- Package version is pinned to the supported markdownzip spec version. -->
     <Version>1.0.1-draft</Version>
