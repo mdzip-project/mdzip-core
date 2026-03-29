@@ -1,7 +1,7 @@
-# mdz-core
+# mdzip-core
 Core .NET library for working with `.mdz` archives.
 
-`mdz-core` provides APIs to:
+`mdzip-core` provides APIs to:
 - create `.mdz` archives from folders or explicit file mappings
 - extract archives safely
 - list archive contents
@@ -10,7 +10,7 @@ Core .NET library for working with `.mdz` archives.
 - validate archives against path and manifest rules
 
 ## Package Info
-- Package ID: `mdz-core`
+- Package ID: `mdzip-core`
 - Target framework: `.NET 8`
 - Output assembly: `mdz.core.dll`
 - Main namespace: `Mdz.Core`
@@ -19,13 +19,13 @@ Core .NET library for working with `.mdz` archives.
 Add the GitHub Packages source and install the package:
 
 ```bash
-dotnet nuget add source "https://nuget.pkg.github.com/kylemwhite/index.json" \
+dotnet nuget add source "https://nuget.pkg.github.com/mdzip-project/index.json" \
   --name github \
   --username <github-username> \
   --password <github-token> \
   --store-password-in-clear-text
 
-dotnet add package mdz-core --source github
+dotnet add package mdzip-core --source github
 ```
 
 ## Quick Start

@@ -7,7 +7,7 @@
     <AssemblyName>mdz.core</AssemblyName>
     <RootNamespace>Mdz.Core</RootNamespace>
 
-    <PackageId>mdz-core</PackageId>
+    <PackageId>mdzip-core</PackageId>
     <Description>Core library assembly for the .mdz format.</Description>
     <Authors>mdz</Authors>
     <PackageReadmeFile>README.md</PackageReadmeFile>
