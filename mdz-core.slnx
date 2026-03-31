@@ -1,8 +1,8 @@
 <Solution>
   <Folder Name="/src/">
-    <Project Path="src/mdz-core/mdz-core.csproj" />
+    <Project Path="src/mdzip-core/mdzip-core.csproj" />
   </Folder>
   <Folder Name="/tests/">
-    <Project Path="tests/mdz-core.Tests/mdz-core.Tests.csproj" />
+    <Project Path="tests/mdzip-core.Tests/mdzip-core.Tests.csproj" />
   </Folder>
 </Solution>

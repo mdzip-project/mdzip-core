@@ -1,7 +1,7 @@
 using System.Text.Json;
-using Mdz.Core;
+using MDZip.Core;
 
-namespace mdz_core.Tests;
+namespace MDZip.Core.Tests;
 
 public class EntryPointFixtureTests
 {

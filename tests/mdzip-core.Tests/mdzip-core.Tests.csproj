@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <TargetFramework>net8.0</TargetFramework>
-    <RootNamespace>mdz_core.Tests</RootNamespace>
+    <RootNamespace>MDZip.Core.Tests</RootNamespace>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
 
@@ -22,7 +22,7 @@
   </ItemGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\..\src\mdz-core\mdz-core.csproj" />
+    <ProjectReference Include="..\..\src\mdzip-core\mdzip-core.csproj" />
   </ItemGroup>
 
   <ItemGroup>

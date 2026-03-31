@@ -4,8 +4,8 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
 
-    <AssemblyName>mdz.core</AssemblyName>
-    <RootNamespace>Mdz.Core</RootNamespace>
+    <AssemblyName>mdzip.core</AssemblyName>
+    <RootNamespace>MDZip.Core</RootNamespace>
 
     <PackageId>mdzip-core</PackageId>
     <Description>Core library assembly for the .mdz format.</Description>

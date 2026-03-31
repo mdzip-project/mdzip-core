@@ -1,7 +1,7 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
 
-namespace Mdz.Models;
+namespace MDZip.Core.Models;
 
 /// <summary>
 /// Represents the optional manifest.json file at the root of a .mdz archive.

@@ -1,6 +1,6 @@
-using Mdz.Core;
+using MDZip.Core;
 
-namespace mdz_core.Tests;
+namespace MDZip.Core.Tests;
 
 public class SpecConformanceTests
 {
@@ -183,6 +183,58 @@ public class SpecConformanceTests
             var result = MdzArchive.Validate(archive);
             Assert.False(result.IsValid);
             Assert.Contains(result.Errors, e => e.Contains("created", StringComparison.OrdinalIgnoreCase));
+        }
+        finally
+        {
+            File.Delete(archive);
+        }
+    }
+
+    [Fact]
+    public void Validate_RejectsNonMarkdownEntryPoint()
+    {
+        var archive = TestFixtureHelper.CreateTempArchive(new Dictionary<string, string>
+        {
+            ["index.md"] = "# Hello",
+            ["assets/cover.png"] = "png",
+            ["manifest.json"] = """
+            {
+              "spec": { "version": "1.0.1" },
+              "entryPoint": "assets/cover.png"
+            }
+            """
+        });
+
+        try
+        {
+            var result = MdzArchive.Validate(archive);
+            Assert.False(result.IsValid);
+            Assert.Contains(result.Errors, e => e.Contains("ERR_ENTRYPOINT_INVALID", StringComparison.Ordinal));
+        }
+        finally
+        {
+            File.Delete(archive);
+        }
+    }
+
+    [Fact]
+    public void Validate_RejectsManifestWithTrailingComma()
+    {
+        var archive = TestFixtureHelper.CreateTempArchive(new Dictionary<string, string>
+        {
+            ["index.md"] = "# Hello",
+            ["manifest.json"] = """
+            {
+              "entryPoint": "index.md",
+            }
+            """
+        });
+
+        try
+        {
+            var result = MdzArchive.Validate(archive);
+            Assert.False(result.IsValid);
+            Assert.Contains(result.Errors, e => e.Contains("ERR_MANIFEST_INVALID", StringComparison.Ordinal));
         }
         finally
         {

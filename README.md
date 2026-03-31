@@ -12,8 +12,8 @@ Core .NET library for working with `.mdz` archives.
 ## Package Info
 - Package ID: `mdzip-core`
 - Target framework: `.NET 8`
-- Output assembly: `mdz.core.dll`
-- Main namespace: `Mdz.Core`
+- Output assembly: `mdzip.core.dll`
+- Main namespace: `MDZip.Core`
 
 ## Installation (GitHub Packages)
 Add the GitHub Packages source and install the package:
@@ -30,8 +30,8 @@ dotnet add package mdzip-core --source github
 
 ## Quick Start
 ```csharp
-using Mdz.Core;
-using Mdz.Models;
+using MDZip.Core;
+using MDZip.Core.Models;
 
 // Create from a directory
 MdzArchive.Create(
@@ -85,7 +85,7 @@ Additional types:
 - `manifest.json` is optional, but if present it is parsed and validated.
 - Supported manifest `spec.version` major version is `1` (when present).
 - Entry point resolution order:
-1. `manifest.entryPoint`
+1. `manifest.entryPoint` (must reference a `.md` or `.markdown` file)
 2. root `index.md`
 3. exactly one root markdown file (`.md` or `.markdown`)
 
@@ -93,12 +93,12 @@ Additional types:
 Build locally:
 
 ```bash
-dotnet restore src/mdz-core/mdz-core.csproj
-dotnet build src/mdz-core/mdz-core.csproj --configuration Release
+dotnet restore src/mdzip-core/mdzip-core.csproj
+dotnet build src/mdzip-core/mdzip-core.csproj --configuration Release
 ```
 
 Pack locally:
 
 ```bash
-dotnet pack src/mdz-core/mdz-core.csproj --configuration Release -o out
+dotnet pack src/mdzip-core/mdzip-core.csproj --configuration Release -o out
 ```

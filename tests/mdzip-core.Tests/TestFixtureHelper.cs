@@ -1,7 +1,7 @@
 using System.IO.Compression;
 using System.Text.Json;
 
-namespace mdz_core.Tests;
+namespace MDZip.Core.Tests;
 
 internal static class TestFixtureHelper
 {
@@ -22,7 +22,7 @@ internal static class TestFixtureHelper
 
     public static string CreateTempArchive(IDictionary<string, string> textEntries)
     {
-        var tempPath = Path.Combine(Path.GetTempPath(), $"mdz-core-tests-{Guid.NewGuid():N}.mdz");
+        var tempPath = Path.Combine(Path.GetTempPath(), $"mdzip-core-tests-{Guid.NewGuid():N}.mdz");
 
         using var archive = ZipFile.Open(tempPath, ZipArchiveMode.Create);
         foreach (var (entryPath, content) in textEntries)

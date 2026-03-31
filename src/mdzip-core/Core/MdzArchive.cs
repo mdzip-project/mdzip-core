@@ -3,9 +3,9 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
-using Mdz.Models;
+using MDZip.Core.Models;
 
-namespace Mdz.Core;
+namespace MDZip.Core;
 
 /// <summary>
 /// Validation result for a .mdz archive.
@@ -33,8 +33,14 @@ public static class MdzArchive
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNameCaseInsensitive = true,
-        ReadCommentHandling = JsonCommentHandling.Skip,
-        AllowTrailingCommas = true,
+        ReadCommentHandling = JsonCommentHandling.Disallow,
+        AllowTrailingCommas = false,
+    };
+
+    private static readonly JsonDocumentOptions StrictJsonDocumentOptions = new()
+    {
+        CommentHandling = JsonCommentHandling.Disallow,
+        AllowTrailingCommas = false,
     };
 
     // -------------------------------------------------------------------------
@@ -513,7 +519,7 @@ public static class MdzArchive
                     using var stream = manifestEntry.Open();
                     using var reader = new StreamReader(stream, Encoding.UTF8);
                     var manifestText = reader.ReadToEnd();
-                    using var manifestJson = JsonDocument.Parse(manifestText);
+                    using var manifestJson = JsonDocument.Parse(manifestText, StrictJsonDocumentOptions);
                     manifestRoot = manifestJson.RootElement.Clone();
                     manifest = JsonSerializer.Deserialize<Manifest>(manifestText, JsonOptions);
                 }
@@ -558,8 +564,14 @@ public static class MdzArchive
                     // Validate entryPoint reference
                     if (!string.IsNullOrWhiteSpace(manifest.EntryPoint))
                     {
-                        if (FindEntry(archive, manifest.EntryPoint) is null)
+                        if (!IsMarkdownPath(manifest.EntryPoint))
+                        {
+                            errors.Add("ERR_ENTRYPOINT_INVALID: manifest 'entryPoint' must reference a Markdown file.");
+                        }
+                        else if (FindEntry(archive, manifest.EntryPoint) is null)
+                        {
                             errors.Add($"ERR_ENTRYPOINT_MISSING: manifest 'entryPoint' references '{manifest.EntryPoint}' which does not exist in the archive.");
+                        }
                     }
 
                     // Validate cover reference
@@ -607,7 +619,7 @@ public static class MdzArchive
         // 1. manifest.json entryPoint
         if (manifest?.EntryPoint is { Length: > 0 } ep)
         {
-            if (FindEntry(archive, ep) is not null)
+            if (IsMarkdownPath(ep) && FindEntry(archive, ep) is not null)
                 return ep;
         }
 
@@ -637,6 +649,13 @@ public static class MdzArchive
 
     private static void EnsureCreatableEntryPoint(IReadOnlyList<string> archivePaths, Manifest? manifest)
     {
+        if (manifest?.EntryPoint is { Length: > 0 } entryPointFormat
+            && !IsMarkdownPath(entryPointFormat))
+        {
+            throw new InvalidOperationException(
+                $"Manifest entryPoint '{entryPointFormat}' must reference a Markdown file.");
+        }
+
         if (manifest?.EntryPoint is { Length: > 0 } entryPoint
             && !archivePaths.Any(path => path.Equals(entryPoint, StringComparison.OrdinalIgnoreCase)))
         {
@@ -656,7 +675,8 @@ public static class MdzArchive
         if (manifest?.EntryPoint is { Length: > 0 } ep
             && archivePaths.Any(path => path.Equals(ep, StringComparison.OrdinalIgnoreCase)))
         {
-            return ep;
+            if (IsMarkdownPath(ep))
+                return ep;
         }
 
         if (archivePaths.Any(path => path.Equals("index.md", StringComparison.OrdinalIgnoreCase)))
@@ -687,6 +707,10 @@ public static class MdzArchive
     private static string NormaliseLf(string content) =>
         content.Replace("\r\n", "\n").Replace("\r", "\n");
 
+    private static bool IsMarkdownPath(string path) =>
+        path.EndsWith(".md", StringComparison.OrdinalIgnoreCase)
+        || path.EndsWith(".markdown", StringComparison.OrdinalIgnoreCase);
+
     private static Manifest? ReadManifestFromArchive(
         ZipArchive archive,
         string replacedOrRemovedPath,
@@ -702,7 +726,7 @@ public static class MdzArchive
             try
             {
                 var manifestText = File.ReadAllText(localManifestPath, Encoding.UTF8);
-                using var _ = JsonDocument.Parse(manifestText); // Must be valid JSON if manifest.json is present.
+                using var _ = JsonDocument.Parse(manifestText, StrictJsonDocumentOptions); // Must be strict JSON if manifest.json is present.
                 var manifest = JsonSerializer.Deserialize<Manifest>(manifestText, JsonOptions);
                 if (manifest is null)
                 {
@@ -778,7 +802,7 @@ public static class MdzArchive
     /// </summary>
     private static string PrepareReplacementManifestJson(string rawJson)
     {
-        var node = JsonNode.Parse(rawJson) as JsonObject
+        var node = JsonNode.Parse(rawJson, nodeOptions: null, documentOptions: StrictJsonDocumentOptions) as JsonObject
             ?? throw new InvalidOperationException("Replacement manifest.json is invalid: expected a JSON object.");
 
         if (node["spec"] is not JsonObject specNode)
@@ -821,7 +845,7 @@ public static class MdzArchive
             using var stream = manifestEntry.Open();
             using var reader = new StreamReader(stream, Encoding.UTF8);
             var json = reader.ReadToEnd();
-            var node = JsonNode.Parse(json) as JsonObject;
+            var node = JsonNode.Parse(json, nodeOptions: null, documentOptions: StrictJsonDocumentOptions) as JsonObject;
             if (node is null)
                 return null;
 

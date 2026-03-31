@@ -12,6 +12,18 @@
     "expectedEntryPoint": "start.md"
   },
   {
+    "name": "non-markdown manifest entryPoint is ignored",
+    "files": [
+      "index.md",
+      "assets/cover.png",
+      "manifest.json"
+    ],
+    "manifest": {
+      "entryPoint": "assets/cover.png"
+    },
+    "expectedEntryPoint": "index.md"
+  },
+  {
     "name": "root index fallback",
     "files": [
       "index.md",

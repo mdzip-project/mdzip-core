@@ -1,8 +1,8 @@
 using System.IO.Compression;
 using System.Text.Json;
-using Mdz.Core;
+using MDZip.Core;
 
-namespace mdz_core.Tests;
+namespace MDZip.Core.Tests;
 
 public class ArchiveMutationTests
 {
@@ -371,7 +371,7 @@ public class ArchiveMutationTests
 
     private static string CreateTempFile(string content)
     {
-        var path = Path.Combine(Path.GetTempPath(), $"mdz-core-file-{Guid.NewGuid():N}.tmp");
+        var path = Path.Combine(Path.GetTempPath(), $"mdzip-core-file-{Guid.NewGuid():N}.tmp");
         File.WriteAllText(path, content);
         return path;
     }

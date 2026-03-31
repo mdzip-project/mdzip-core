@@ -1,4 +1,4 @@
-namespace Mdz.Core;
+namespace MDZip.Core;
 
 /// <summary>
 /// Validates file paths inside a .mdz archive per Section 5.4 of the spec.
