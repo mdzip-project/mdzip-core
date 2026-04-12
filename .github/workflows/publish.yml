@@ -15,7 +15,7 @@ permissions:
 env:
   DOTNET_VERSION: '8.0.x'
   SOLUTION_PATH: mdz-core.slnx
-  PROJECT_PATH: src/mdz-core/mdz-core.csproj
+  PROJECT_PATH: src/mdzip-core/mdzip-core.csproj
 
 jobs:
   publish:
