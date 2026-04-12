@@ -112,6 +112,113 @@ public class SpecConformanceTests
     }
 
     [Fact]
+    public void Validate_AllowsDocumentMode()
+    {
+        var archive = TestFixtureHelper.CreateTempArchive(new Dictionary<string, string>
+        {
+            ["index.md"] = "# Hello",
+            ["manifest.json"] = """
+            {
+              "spec": { "version": "1.0.1" },
+              "mode": "document",
+              "entryPoint": "index.md"
+            }
+            """
+        });
+
+        try
+        {
+            var result = MdzArchive.Validate(archive);
+            Assert.True(result.IsValid);
+        }
+        finally
+        {
+            File.Delete(archive);
+        }
+    }
+
+    [Fact]
+    public void Validate_AllowsProjectMode()
+    {
+        var archive = TestFixtureHelper.CreateTempArchive(new Dictionary<string, string>
+        {
+            ["index.md"] = "# Hello",
+            ["chapter-1.md"] = "# Chapter 1",
+            ["manifest.json"] = """
+            {
+              "spec": { "version": "1.0.1" },
+              "mode": "project",
+              "entryPoint": "index.md"
+            }
+            """
+        });
+
+        try
+        {
+            var result = MdzArchive.Validate(archive);
+            Assert.True(result.IsValid);
+        }
+        finally
+        {
+            File.Delete(archive);
+        }
+    }
+
+    [Fact]
+    public void Validate_RejectsUnsupportedModeValue()
+    {
+        var archive = TestFixtureHelper.CreateTempArchive(new Dictionary<string, string>
+        {
+            ["index.md"] = "# Hello",
+            ["manifest.json"] = """
+            {
+              "spec": { "version": "1.0.1" },
+              "mode": "Document",
+              "entryPoint": "index.md"
+            }
+            """
+        });
+
+        try
+        {
+            var result = MdzArchive.Validate(archive);
+            Assert.False(result.IsValid);
+            Assert.Contains(result.Errors, e => e.Contains("ERR_MODE_UNSUPPORTED", StringComparison.Ordinal));
+        }
+        finally
+        {
+            File.Delete(archive);
+        }
+    }
+
+    [Fact]
+    public void Validate_RejectsWhitespaceOnlyModeValue()
+    {
+        var archive = TestFixtureHelper.CreateTempArchive(new Dictionary<string, string>
+        {
+            ["index.md"] = "# Hello",
+            ["manifest.json"] = """
+            {
+              "spec": { "version": "1.0.1" },
+              "mode": "   ",
+              "entryPoint": "index.md"
+            }
+            """
+        });
+
+        try
+        {
+            var result = MdzArchive.Validate(archive);
+            Assert.False(result.IsValid);
+            Assert.Contains(result.Errors, e => e.Contains("ERR_MODE_UNSUPPORTED", StringComparison.Ordinal));
+        }
+        finally
+        {
+            File.Delete(archive);
+        }
+    }
+
+    [Fact]
     public void Validate_AllowsManifestWithoutSpecVersionAndWarns()
     {
         var archive = TestFixtureHelper.CreateTempArchive(new Dictionary<string, string>

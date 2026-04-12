@@ -7,6 +7,35 @@ namespace MDZip.Core.Tests;
 public class ArchiveMutationTests
 {
     [Fact]
+    public void Create_RejectsInvalidManifestMode()
+    {
+        var sourceDirectory = CreateTempDirectory();
+        File.WriteAllText(Path.Combine(sourceDirectory, "index.md"), "# Hello");
+
+        var archivePath = Path.Combine(Path.GetTempPath(), $"mdzip-core-tests-{Guid.NewGuid():N}.mdz");
+
+        try
+        {
+            var ex = Assert.Throws<InvalidOperationException>(() =>
+                MdzArchive.Create(
+                    archivePath,
+                    sourceDirectory,
+                    new MDZip.Core.Models.Manifest
+                    {
+                        Mode = "Document",
+                        EntryPoint = "index.md",
+                    }));
+
+            Assert.Contains("mode", ex.Message, StringComparison.OrdinalIgnoreCase);
+        }
+        finally
+        {
+            SafeDelete(archivePath);
+            SafeDeleteDirectory(sourceDirectory);
+        }
+    }
+
+    [Fact]
     public void AddFile_AddsNewEntry()
     {
         var archivePath = TestFixtureHelper.CreateTempArchive(new Dictionary<string, string>
@@ -98,6 +127,29 @@ public class ArchiveMutationTests
             // Mutation should be atomic; original manifest remains untouched.
             var manifest = MdzArchive.ReadManifest(archivePath);
             Assert.Equal("index.md", manifest?.EntryPoint);
+        }
+        finally
+        {
+            SafeDelete(archivePath);
+            SafeDelete(invalidManifest);
+        }
+    }
+
+    [Fact]
+    public void AddFile_ManifestReplacementWithInvalidMode_Throws()
+    {
+        var archivePath = TestFixtureHelper.CreateTempArchive(new Dictionary<string, string>
+        {
+            ["index.md"] = "# Hello",
+            ["manifest.json"] = """{ "entryPoint": "index.md" }"""
+        });
+        var invalidManifest = CreateTempFile("""{ "mode": "Document", "entryPoint": "index.md" }""");
+
+        try
+        {
+            var ex = Assert.Throws<InvalidOperationException>(() =>
+                MdzArchive.AddFile(archivePath, "manifest.json", invalidManifest));
+            Assert.Contains("mode", ex.Message, StringComparison.OrdinalIgnoreCase);
         }
         finally
         {
@@ -376,9 +428,22 @@ public class ArchiveMutationTests
         return path;
     }
 
+    private static string CreateTempDirectory()
+    {
+        var path = Path.Combine(Path.GetTempPath(), $"mdzip-core-dir-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(path);
+        return path;
+    }
+
     private static void SafeDelete(string path)
     {
         if (File.Exists(path))
             File.Delete(path);
+    }
+
+    private static void SafeDeleteDirectory(string path)
+    {
+        if (Directory.Exists(path))
+            Directory.Delete(path, recursive: true);
     }
 }

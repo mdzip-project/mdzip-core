@@ -558,6 +558,11 @@ public static class MdzArchive
                             warnings.Add($"manifest 'spec.version' major version {major} is older than supported major {SupportedMajorVersion}.");
                     }
 
+                    if (manifest.Mode is not null && !IsSupportedMode(manifest.Mode))
+                    {
+                        errors.Add($"ERR_MODE_UNSUPPORTED: manifest 'mode' value '{manifest.Mode}' is not supported.");
+                    }
+
                     if (manifest.Title is not null && string.IsNullOrWhiteSpace(manifest.Title))
                         errors.Add("ERR_MANIFEST_INVALID: manifest field 'title' must not be empty when present.");
 
@@ -649,6 +654,12 @@ public static class MdzArchive
 
     private static void EnsureCreatableEntryPoint(IReadOnlyList<string> archivePaths, Manifest? manifest)
     {
+        if (manifest?.Mode is not null && !IsSupportedMode(manifest.Mode))
+        {
+            throw new InvalidOperationException(
+                $"Manifest mode '{manifest.Mode}' is not supported. Allowed values are 'document' and 'project'.");
+        }
+
         if (manifest?.EntryPoint is { Length: > 0 } entryPointFormat
             && !IsMarkdownPath(entryPointFormat))
         {
@@ -710,6 +721,9 @@ public static class MdzArchive
     private static bool IsMarkdownPath(string path) =>
         path.EndsWith(".md", StringComparison.OrdinalIgnoreCase)
         || path.EndsWith(".markdown", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsSupportedMode(string mode) =>
+        mode is "document" or "project";
 
     private static Manifest? ReadManifestFromArchive(
         ZipArchive archive,

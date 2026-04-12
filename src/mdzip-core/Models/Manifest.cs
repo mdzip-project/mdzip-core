@@ -21,6 +21,13 @@ public sealed class Manifest
     public string? Title { get; set; }
 
     /// <summary>
+    /// The interpretation mode of the archive.
+    /// Allowed values in the current draft are "document" and "project".
+    /// </summary>
+    [JsonPropertyName("mode")]
+    public string? Mode { get; set; }
+
+    /// <summary>
     /// Path to the primary Markdown file, relative to the archive root.
     /// </summary>
     [JsonPropertyName("entryPoint")]
