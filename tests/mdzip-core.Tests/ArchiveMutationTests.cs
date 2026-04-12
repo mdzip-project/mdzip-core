@@ -175,7 +175,7 @@ public class ArchiveMutationTests
             var manifest = MdzArchive.ReadManifest(archivePath);
             Assert.NotNull(manifest);
             Assert.NotNull(manifest!.Spec);
-            Assert.Equal("1.0.1-draft", manifest.Spec!.Version);
+            Assert.Equal("1.1.0-draft", manifest.Spec!.Version);
             Assert.False(string.IsNullOrWhiteSpace(manifest.Modified));
         }
         finally

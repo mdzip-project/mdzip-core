@@ -24,7 +24,7 @@ public static class MdzArchive
 {
     private const string ManifestFileName = "manifest.json";
     private const string SpecName = "markdownzip-spec";
-    private const string ProducedSpecVersion = "1.0.1-draft";
+    private const string ProducedSpecVersion = "1.1.0-draft";
     private const int SupportedMajorVersion = 1;
     private static readonly Regex SemVerRegex = new(
         @"^(?<major>0|[1-9]\d*)\.(?<minor>0|[1-9]\d*)\.(?<patch>0|[1-9]\d*)(?:-(?<prerelease>(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+(?<build>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$",

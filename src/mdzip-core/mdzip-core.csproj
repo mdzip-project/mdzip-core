@@ -14,7 +14,7 @@
     <RepositoryUrl>https://github.com/mdzip-project/mdzip-core</RepositoryUrl>
 
     <!-- Package version is pinned to the supported markdownzip spec version. -->
-    <Version>1.0.1-draft.2</Version>
+    <Version>1.1.0-draft</Version>
     <PackageVersion>$(Version)</PackageVersion>
 
     <GeneratePackageOnBuild>false</GeneratePackageOnBuild>

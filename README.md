@@ -39,7 +39,7 @@ MdzArchive.Create(
     sourceDirectory: "content",
     manifest: new Manifest
     {
-        Spec = new ManifestSpec { Name = "markdownzip-spec", Version = "1.0.1-draft" },
+        Spec = new ManifestSpec { Name = "markdownzip-spec", Version = "1.1.0-draft" },
         Title = "My Document",
         EntryPoint = "index.md"
     });
