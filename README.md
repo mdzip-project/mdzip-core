@@ -15,17 +15,11 @@ Core .NET library for working with `.mdz` archives.
 - Output assembly: `mdzip.core.dll`
 - Main namespace: `MDZip.Core`
 
-## Installation (GitHub Packages)
-Add the GitHub Packages source and install the package:
+## Installation (NuGet.org)
+Install the package from NuGet.org:
 
 ```bash
-dotnet nuget add source "https://nuget.pkg.github.com/mdzip-project/index.json" \
-  --name github \
-  --username <github-username> \
-  --password <github-token> \
-  --store-password-in-clear-text
-
-dotnet add package mdzip-core --source github
+dotnet add package mdzip-core
 ```
 
 ## Quick Start
