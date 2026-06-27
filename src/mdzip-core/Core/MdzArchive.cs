@@ -39,6 +39,30 @@ public static class MdzArchive
             ["ico"] = "image/x-icon",
         };
 
+    private static readonly IReadOnlyDictionary<string, string> KnownMimeTypes =
+        new Dictionary<string, string>(ImageMimeTypes, StringComparer.OrdinalIgnoreCase)
+        {
+            ["mp3"] = "audio/mpeg",
+            ["wav"] = "audio/wav",
+            ["ogg"] = "audio/ogg",
+            ["m4a"] = "audio/mp4",
+            ["mp4"] = "video/mp4",
+            ["webm"] = "video/webm",
+            ["mov"] = "video/quicktime",
+            ["woff"] = "font/woff",
+            ["woff2"] = "font/woff2",
+            ["ttf"] = "font/ttf",
+            ["otf"] = "font/otf",
+            ["json"] = "application/json",
+            ["csv"] = "text/csv",
+            ["txt"] = "text/plain",
+            ["css"] = "text/css",
+            ["html"] = "text/html",
+            ["htm"] = "text/html",
+            ["xml"] = "application/xml",
+            ["pdf"] = "application/pdf",
+        };
+
     private static readonly Regex SemVerRegex = new(
         @"^(?<major>0|[1-9]\d*)\.(?<minor>0|[1-9]\d*)\.(?<patch>0|[1-9]\d*)(?:-(?<prerelease>(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+(?<build>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
@@ -953,6 +977,126 @@ public static class MdzArchive
     }
 
     // -------------------------------------------------------------------------
+    // Assets
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Infers a MIME type from an archive path.
+    /// </summary>
+    public static string InferMimeType(string path, string fallbackMime = "application/octet-stream")
+    {
+        var extension = Path.GetExtension(NormaliseArchivePath(path)).TrimStart('.').ToLowerInvariant();
+        return KnownMimeTypes.TryGetValue(extension, out var mimeType) ? mimeType : fallbackMime;
+    }
+
+    /// <summary>
+    /// Classifies an archive asset as image, audio, video, font, data, or other.
+    /// </summary>
+    public static string ClassifyAssetKind(string path, string? mimeType = null)
+    {
+        mimeType ??= InferMimeType(path);
+        if (mimeType.StartsWith("image/", StringComparison.OrdinalIgnoreCase)) return "image";
+        if (mimeType.StartsWith("audio/", StringComparison.OrdinalIgnoreCase)) return "audio";
+        if (mimeType.StartsWith("video/", StringComparison.OrdinalIgnoreCase)) return "video";
+        if (mimeType.StartsWith("font/", StringComparison.OrdinalIgnoreCase)) return "font";
+        return IsDataMimeType(mimeType) ? "data" : "other";
+    }
+
+    /// <summary>
+    /// Returns true when common browser surfaces can preview this asset.
+    /// </summary>
+    public static bool IsPreviewableAsset(string path, string? mimeType = null)
+    {
+        mimeType ??= InferMimeType(path);
+        return mimeType.StartsWith("image/", StringComparison.OrdinalIgnoreCase)
+            || IsDataMimeType(mimeType);
+    }
+
+    /// <summary>
+    /// Finds image-like archive assets not referenced by scanned Markdown or manifest cover metadata.
+    /// </summary>
+    public static MdzOrphanedAssetsResult FindOrphanedAssets(
+        string archivePath,
+        MdzOrphanedAssetsOptions? options = null)
+    {
+        options ??= new MdzOrphanedAssetsOptions();
+        var allEntries = ListDetailed(archivePath);
+        var assetPaths = allEntries
+            .Where(entry => !entry.IsDirectory && entry.IsImage)
+            .Select(entry => entry.Path)
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        var assetPathSet = assetPaths.ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var scannedMarkdownPaths = options.ScanMode == "all-markdown"
+            ? allEntries.Where(entry => entry.IsMarkdown).Select(entry => entry.Path).ToList()
+            : [NormaliseArchivePath(options.EntryPoint ?? ResolveEntryPoint(archivePath) ?? string.Empty)];
+        scannedMarkdownPaths = scannedMarkdownPaths.Where(path => !string.IsNullOrWhiteSpace(path)).ToList();
+
+        var referencedAssets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var unresolvedReferences = new List<MdzOrphanedAssetReferenceIssue>();
+
+        foreach (var markdownPath in scannedMarkdownPaths)
+        {
+            var markdown = ReadText(archivePath, markdownPath);
+            foreach (var reference in ExtractMarkdownImageReferences(markdown))
+            {
+                if (HasUriScheme(reference))
+                {
+                    unresolvedReferences.Add(new MdzOrphanedAssetReferenceIssue(markdownPath, reference, "unsupported-scheme"));
+                    continue;
+                }
+
+                string resolved;
+                try
+                {
+                    resolved = ResolveArchiveRelativePath(markdownPath, reference);
+                }
+                catch (InvalidOperationException)
+                {
+                    unresolvedReferences.Add(new MdzOrphanedAssetReferenceIssue(markdownPath, reference, "invalid-path"));
+                    continue;
+                }
+
+                var entry = FindEntry(archivePath, resolved);
+                if (entry is null || entry.IsDirectory)
+                {
+                    unresolvedReferences.Add(new MdzOrphanedAssetReferenceIssue(markdownPath, reference, "not-found"));
+                    continue;
+                }
+
+                if (!IsImagePath(resolved) || !assetPathSet.Contains(resolved))
+                {
+                    unresolvedReferences.Add(new MdzOrphanedAssetReferenceIssue(markdownPath, reference, "not-asset"));
+                    continue;
+                }
+
+                referencedAssets.Add(ResolvePathCase(assetPaths, resolved));
+            }
+        }
+
+        var manifest = ReadManifest(archivePath);
+        if (!string.IsNullOrWhiteSpace(manifest?.Cover))
+        {
+            var cover = NormaliseArchivePath(manifest.Cover);
+            if (assetPathSet.Contains(cover))
+                referencedAssets.Add(ResolvePathCase(assetPaths, cover));
+        }
+
+        var referencedAssetPaths = referencedAssets.OrderBy(path => path, StringComparer.OrdinalIgnoreCase).ToList();
+        var orphanedAssetPaths = assetPaths
+            .Where(path => !referencedAssets.Contains(path))
+            .ToList();
+
+        return new MdzOrphanedAssetsResult(
+            scannedMarkdownPaths,
+            assetPaths,
+            referencedAssetPaths,
+            orphanedAssetPaths,
+            unresolvedReferences);
+    }
+
+    // -------------------------------------------------------------------------
     // Validate
     // -------------------------------------------------------------------------
 
@@ -1317,6 +1461,15 @@ public static class MdzArchive
     private static string NormaliseLf(string content) =>
         content.Replace("\r\n", "\n").Replace("\r", "\n");
 
+    private static bool IsDataMimeType(string mimeType) =>
+        mimeType.Equals("application/json", StringComparison.OrdinalIgnoreCase)
+        || mimeType.Equals("text/csv", StringComparison.OrdinalIgnoreCase)
+        || mimeType.Equals("text/plain", StringComparison.OrdinalIgnoreCase)
+        || mimeType.Equals("text/css", StringComparison.OrdinalIgnoreCase)
+        || mimeType.Equals("text/html", StringComparison.OrdinalIgnoreCase)
+        || mimeType.Equals("application/xml", StringComparison.OrdinalIgnoreCase)
+        || mimeType.Equals("text/xml", StringComparison.OrdinalIgnoreCase);
+
     private static bool IsMarkdownPath(string path) =>
         path.EndsWith(".md", StringComparison.OrdinalIgnoreCase)
         || path.EndsWith(".markdown", StringComparison.OrdinalIgnoreCase);
@@ -1330,6 +1483,69 @@ public static class MdzArchive
 
     private static bool IsSupportedMode(string mode) =>
         mode is "document" or "project";
+
+    private static IReadOnlyList<string> ExtractMarkdownImageReferences(string markdown)
+    {
+        var references = new List<string>();
+        foreach (Match match in Regex.Matches(
+            markdown,
+            @"!\[[^\]]*\]\(\s*(?<target><[^>]+>|[^)\s]+)(?:\s+""[^""]*"")?\s*\)",
+            RegexOptions.CultureInvariant))
+        {
+            var target = match.Groups["target"].Value.Trim();
+            if (target.StartsWith("<", StringComparison.Ordinal) && target.EndsWith(">", StringComparison.Ordinal))
+                target = target[1..^1].Trim();
+            references.Add(target);
+        }
+
+        return references;
+    }
+
+    private static bool HasUriScheme(string reference) =>
+        Regex.IsMatch(reference, @"^[A-Za-z][A-Za-z0-9+.-]*:", RegexOptions.CultureInvariant);
+
+    private static string ResolveArchiveRelativePath(string basePath, string relative)
+    {
+        var target = relative.Trim();
+        var queryIndex = target.IndexOf('?');
+        if (queryIndex >= 0)
+            target = target[..queryIndex];
+        var hashIndex = target.IndexOf('#');
+        if (hashIndex >= 0)
+            target = target[..hashIndex];
+
+        target = Uri.UnescapeDataString(target).Replace('\\', '/');
+        if (target.StartsWith("/", StringComparison.Ordinal))
+            throw new InvalidOperationException("Path must be relative.");
+
+        var baseDirectory = string.Empty;
+        var slash = NormaliseArchivePath(basePath).LastIndexOf('/');
+        if (slash >= 0)
+            baseDirectory = NormaliseArchivePath(basePath)[..(slash + 1)];
+
+        var parts = (baseDirectory + target).Split('/', StringSplitOptions.RemoveEmptyEntries);
+        var output = new List<string>();
+        foreach (var part in parts)
+        {
+            if (part == ".")
+                continue;
+
+            if (part == "..")
+            {
+                if (output.Count == 0)
+                    throw new InvalidOperationException("Path escapes archive root.");
+                output.RemoveAt(output.Count - 1);
+                continue;
+            }
+
+            output.Add(part);
+        }
+
+        return string.Join('/', output);
+    }
+
+    private static string ResolvePathCase(IEnumerable<string> paths, string candidate) =>
+        paths.First(path => path.Equals(candidate, StringComparison.OrdinalIgnoreCase));
 
     private static Manifest? ReadManifestFromArchive(
         ZipArchive archive,
@@ -2002,3 +2218,30 @@ public sealed record MdzPackBuildResult(
     IReadOnlyList<string> ArchivePaths,
     IReadOnlyList<MdzSelectedFile> Selected,
     MdzPackWarnings Warnings);
+
+/// <summary>
+/// Controls orphaned asset analysis.
+/// </summary>
+public sealed class MdzOrphanedAssetsOptions
+{
+    public string ScanMode { get; set; } = "entrypoint";
+    public string? EntryPoint { get; set; }
+}
+
+/// <summary>
+/// One image reference that could not be counted as a valid asset reference.
+/// </summary>
+public sealed record MdzOrphanedAssetReferenceIssue(
+    string SourcePath,
+    string Reference,
+    string Reason);
+
+/// <summary>
+/// Result returned by orphaned asset analysis.
+/// </summary>
+public sealed record MdzOrphanedAssetsResult(
+    IReadOnlyList<string> ScannedMarkdownPaths,
+    IReadOnlyList<string> AssetPaths,
+    IReadOnlyList<string> ReferencedAssetPaths,
+    IReadOnlyList<string> OrphanedAssetPaths,
+    IReadOnlyList<MdzOrphanedAssetReferenceIssue> UnresolvedReferences);
