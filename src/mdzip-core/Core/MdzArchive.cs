@@ -576,6 +576,49 @@ public static class MdzArchive
     // -------------------------------------------------------------------------
 
     /// <summary>
+    /// Converts validation details into a compact status string: valid, warning, or error.
+    /// </summary>
+    public static string GetValidationStatus(ValidationResult result)
+    {
+        if (!result.IsValid || result.Errors.Count > 0)
+            return "error";
+
+        return result.Warnings.Count > 0 ? "warning" : "valid";
+    }
+
+    /// <summary>
+    /// Validates raw manifest.json text without requiring an archive.
+    /// </summary>
+    public static ValidationResult ValidateManifest(string manifestJson)
+    {
+        try
+        {
+            using var manifestDocument = JsonDocument.Parse(manifestJson, StrictJsonDocumentOptions);
+            var root = manifestDocument.RootElement.Clone();
+            if (root.ValueKind != JsonValueKind.Object)
+                return ValidateManifest(manifest: null, root);
+
+            var manifest = JsonSerializer.Deserialize<Manifest>(manifestJson, JsonOptions);
+            return ValidateManifest(manifest, root);
+        }
+        catch (JsonException ex)
+        {
+            return new ValidationResult
+            {
+                IsValid = false,
+                Errors = [$"ERR_MANIFEST_INVALID: manifest.json could not be parsed: {ex.Message}"],
+                Warnings = [],
+            };
+        }
+    }
+
+    /// <summary>
+    /// Validates a manifest object without requiring an archive.
+    /// </summary>
+    public static ValidationResult ValidateManifest(Manifest? manifest) =>
+        ValidateManifest(manifest, manifestRoot: null);
+
+    /// <summary>
     /// Validates a .mdz archive against the specification.
     /// </summary>
     public static ValidationResult Validate(string archivePath)
@@ -652,40 +695,13 @@ public static class MdzArchive
 
                 if (manifest is null)
                 {
-                    errors.Add("ERR_MANIFEST_INVALID: manifest.json deserialised to null.");
+                    errors.AddRange(ValidateManifest(manifest, manifestRoot).Errors);
                 }
                 else
                 {
-                    if (manifestRoot is not null)
-                    {
-                        ValidateDraftTimestampField(manifestRoot.Value, "created", errors);
-                        ValidateDraftTimestampField(manifestRoot.Value, "modified", errors);
-                    }
-
-                    if (string.IsNullOrWhiteSpace(manifest.Spec?.Version))
-                    {
-                        warnings.Add("manifest 'spec.version' is missing; version metadata is unavailable.");
-                    }
-                    else
-                    {
-                        // Validate SemVer 2.0.0 and enforce major-version compatibility:
-                        // - reject higher unsupported major versions
-                        // - allow lower major versions with a warning
-                        if (!TryParseSemVerMajor(manifest.Spec.Version, out var major))
-                            errors.Add($"ERR_MANIFEST_INVALID: 'spec.version' field '{manifest.Spec.Version}' is not a valid semver string.");
-                        else if (major > SupportedMajorVersion)
-                            errors.Add($"ERR_VERSION_UNSUPPORTED: manifest 'spec.version' major version {major} is not supported (supported: {SupportedMajorVersion}).");
-                        else if (major < SupportedMajorVersion)
-                            warnings.Add($"manifest 'spec.version' major version {major} is older than supported major {SupportedMajorVersion}.");
-                    }
-
-                    if (manifest.Mode is not null && !IsSupportedMode(manifest.Mode))
-                    {
-                        errors.Add($"ERR_MODE_UNSUPPORTED: manifest 'mode' value '{manifest.Mode}' is not supported.");
-                    }
-
-                    if (manifest.Title is not null && string.IsNullOrWhiteSpace(manifest.Title))
-                        errors.Add("ERR_MANIFEST_INVALID: manifest field 'title' must not be empty when present.");
+                    var manifestValidation = ValidateManifest(manifest, manifestRoot);
+                    errors.AddRange(manifestValidation.Errors);
+                    warnings.AddRange(manifestValidation.Warnings);
 
                     // Validate entryPoint reference
                     if (!string.IsNullOrWhiteSpace(manifest.EntryPoint))
@@ -1229,6 +1245,64 @@ public static class MdzArchive
         }
 
         return false;
+    }
+
+    private static ValidationResult ValidateManifest(Manifest? manifest, JsonElement? manifestRoot)
+    {
+        var errors = new List<string>();
+        var warnings = new List<string>();
+
+        if (manifestRoot is { ValueKind: not JsonValueKind.Object })
+        {
+            errors.Add("ERR_MANIFEST_INVALID: manifest.json must be a JSON object.");
+            return new ValidationResult { IsValid = false, Errors = errors, Warnings = warnings };
+        }
+
+        if (manifest is null)
+        {
+            errors.Add("ERR_MANIFEST_INVALID: manifest.json deserialised to null.");
+            return new ValidationResult { IsValid = false, Errors = errors, Warnings = warnings };
+        }
+
+        if (manifestRoot is not null)
+        {
+            ValidateDraftTimestampField(manifestRoot.Value, "created", errors);
+            ValidateDraftTimestampField(manifestRoot.Value, "modified", errors);
+        }
+
+        if (string.IsNullOrWhiteSpace(manifest.Spec?.Version))
+        {
+            warnings.Add("manifest 'spec.version' is missing; version metadata is unavailable.");
+        }
+        else
+        {
+            if (!TryParseSemVerMajor(manifest.Spec.Version, out var major))
+                errors.Add($"ERR_MANIFEST_INVALID: 'spec.version' field '{manifest.Spec.Version}' is not a valid semver string.");
+            else if (major > SupportedMajorVersion)
+                errors.Add($"ERR_VERSION_UNSUPPORTED: manifest 'spec.version' major version {major} is not supported (supported: {SupportedMajorVersion}).");
+            else if (major < SupportedMajorVersion)
+                warnings.Add($"manifest 'spec.version' major version {major} is older than supported major {SupportedMajorVersion}.");
+        }
+
+        if (manifest.Mode is not null && !IsSupportedMode(manifest.Mode))
+            errors.Add($"ERR_MODE_UNSUPPORTED: manifest 'mode' value '{manifest.Mode}' is not supported.");
+
+        if (manifest.Title is not null && string.IsNullOrWhiteSpace(manifest.Title))
+            errors.Add("ERR_MANIFEST_INVALID: manifest field 'title' must not be empty when present.");
+
+        if (manifest.EntryPoint is not null)
+        {
+            var pathError = PathValidator.Validate(manifest.EntryPoint);
+            if (pathError is not null)
+                errors.Add($"ERR_MANIFEST_INVALID: manifest 'entryPoint' must be a valid archive-relative path: {pathError}");
+        }
+
+        return new ValidationResult
+        {
+            IsValid = errors.Count == 0,
+            Errors = errors,
+            Warnings = warnings,
+        };
     }
 }
 
