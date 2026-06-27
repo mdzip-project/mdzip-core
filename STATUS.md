@@ -1,5 +1,5 @@
-Status: idle
-Last: Committed core parity Phase 6 workspace APIs
+Status: in-progress
+Last: Preparing mdzip-core 1.3.0 release
 
 <!-- Dashboard reads these two lines.
      Status: idle | in-progress | awaiting-test | ready-to-commit | blocked
