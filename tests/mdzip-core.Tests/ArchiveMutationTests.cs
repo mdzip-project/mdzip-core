@@ -421,6 +421,123 @@ public class ArchiveMutationTests
         }
     }
 
+    [Fact]
+    public void RemoveFiles_RemovesMultipleEntriesAtomically()
+    {
+        var archivePath = TestFixtureHelper.CreateTempArchive(new Dictionary<string, string>
+        {
+            ["index.md"] = "# Hello",
+            ["assets/one.txt"] = "1",
+            ["assets/two.txt"] = "2",
+            ["manifest.json"] = """{ "entryPoint": "index.md" }"""
+        });
+
+        try
+        {
+            var result = MdzArchive.RemoveFiles(archivePath, ["assets/one.txt", "assets/two.txt"]);
+
+            Assert.DoesNotContain("assets/one.txt", result.ArchivePaths);
+            Assert.DoesNotContain("assets/two.txt", result.ArchivePaths);
+            Assert.Contains("index.md", result.ArchivePaths);
+            Assert.Equal("index.md", result.ResolvedEntryPoint);
+            Assert.False(string.IsNullOrWhiteSpace(result.Manifest?.Modified));
+        }
+        finally
+        {
+            SafeDelete(archivePath);
+        }
+    }
+
+    [Fact]
+    public void UpdateFiles_AppliesWritesAndRemovalsInOneRewrite()
+    {
+        var archivePath = TestFixtureHelper.CreateTempArchive(new Dictionary<string, string>
+        {
+            ["index.md"] = "# Old",
+            ["assets/remove.txt"] = "remove",
+            ["manifest.json"] = """{ "entryPoint": "index.md" }"""
+        });
+        var replacementIndex = CreateTempFile("# New");
+        var newAsset = CreateTempFile("asset");
+
+        try
+        {
+            var result = MdzArchive.UpdateFiles(
+                archivePath,
+                [
+                    new ArchiveWriteSpec("index.md", replacementIndex),
+                    new ArchiveWriteSpec("assets/new.txt", newAsset),
+                ],
+                ["assets/remove.txt"]);
+
+            Assert.Equal("# New", MdzArchive.ReadText(archivePath, "index.md"));
+            Assert.Contains("assets/new.txt", result.ArchivePaths);
+            Assert.DoesNotContain("assets/remove.txt", result.ArchivePaths);
+            Assert.Equal("index.md", result.ResolvedEntryPoint);
+        }
+        finally
+        {
+            SafeDelete(archivePath);
+            SafeDelete(replacementIndex);
+            SafeDelete(newAsset);
+        }
+    }
+
+    [Fact]
+    public void UpdateFiles_RemovalWinsOverWriteForSamePath()
+    {
+        var archivePath = TestFixtureHelper.CreateTempArchive(new Dictionary<string, string>
+        {
+            ["index.md"] = "# Hello",
+            ["assets/conflict.txt"] = "old"
+        });
+        var replacement = CreateTempFile("new");
+
+        try
+        {
+            var result = MdzArchive.UpdateFiles(
+                archivePath,
+                [new ArchiveWriteSpec("assets/conflict.txt", replacement)],
+                ["assets/conflict.txt"]);
+
+            Assert.DoesNotContain("assets/conflict.txt", result.ArchivePaths);
+            Assert.False(MdzArchive.HasEntry(archivePath, "assets/conflict.txt"));
+        }
+        finally
+        {
+            SafeDelete(archivePath);
+            SafeDelete(replacement);
+        }
+    }
+
+    [Fact]
+    public void UpdateFiles_MissingRemovalDoesNotModifyArchive()
+    {
+        var archivePath = TestFixtureHelper.CreateTempArchive(new Dictionary<string, string>
+        {
+            ["index.md"] = "# Hello",
+            ["assets/keep.txt"] = "keep"
+        });
+        var replacement = CreateTempFile("# Changed");
+
+        try
+        {
+            Assert.Throws<FileNotFoundException>(() =>
+                MdzArchive.UpdateFiles(
+                    archivePath,
+                    [new ArchiveWriteSpec("index.md", replacement)],
+                    ["missing.txt"]));
+
+            Assert.Equal("# Hello", MdzArchive.ReadText(archivePath, "index.md"));
+            Assert.True(MdzArchive.HasEntry(archivePath, "assets/keep.txt"));
+        }
+        finally
+        {
+            SafeDelete(archivePath);
+            SafeDelete(replacement);
+        }
+    }
+
     private static string CreateTempFile(string content)
     {
         var path = Path.Combine(Path.GetTempPath(), $"mdzip-core-file-{Guid.NewGuid():N}.tmp");
