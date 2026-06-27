@@ -1,5 +1,5 @@
 Status: idle
-Last: Committed core parity Phase 5 asset APIs
+Last: Committed core parity Phase 6 workspace APIs
 
 <!-- Dashboard reads these two lines.
      Status: idle | in-progress | awaiting-test | ready-to-commit | blocked

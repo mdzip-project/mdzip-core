@@ -1097,6 +1097,164 @@ public static class MdzArchive
     }
 
     // -------------------------------------------------------------------------
+    // Workspace
+    // -------------------------------------------------------------------------
+
+    /// <summary>
+    /// Opens an archive as a normalized workspace model.
+    /// </summary>
+    public static MdzWorkspace OpenWorkspace(string archivePath, MdzOpenWorkspaceOptions? options = null)
+    {
+        options ??= new MdzOpenWorkspaceOptions();
+        var validation = Validate(archivePath);
+        var manifest = ReadManifest(archivePath);
+        var mode = ResolveMode(archivePath);
+        var entryPoint = ResolveEntryPoint(archivePath);
+        var entries = ListDetailed(archivePath);
+
+        var documents = entries
+            .Where(entry => entry.IsMarkdown)
+            .Select(entry => new MdzWorkspaceDocument(
+                entry.Path,
+                GetDocumentTitle(entry.Path, manifest),
+                ReadText(archivePath, entry.Path),
+                entryPoint is not null && entry.Path.Equals(entryPoint, StringComparison.OrdinalIgnoreCase)))
+            .ToList();
+
+        var assets = entries
+            .Where(entry => !entry.IsMarkdown
+                && !entry.IsDirectory
+                && !entry.Path.Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase))
+            .Select(entry =>
+            {
+                var mimeType = InferMimeType(entry.Path);
+                return new MdzWorkspaceAsset(
+                    entry.Path,
+                    Path.GetFileName(entry.Path),
+                    entry.Size,
+                    mimeType,
+                    ClassifyAssetKind(entry.Path, mimeType),
+                    IsPreviewableAsset(entry.Path, mimeType),
+                    ReadBytes(archivePath, entry.Path));
+            })
+            .ToList();
+
+        var orphanedAssets = options.IncludeOrphanedAssetAnalysis
+            ? FindOrphanedAssets(archivePath, new MdzOrphanedAssetsOptions { ScanMode = options.OrphanedAssetScanMode })
+            : null;
+
+        return new MdzWorkspace(
+            manifest?.Title,
+            mode,
+            manifest,
+            entryPoint,
+            documents,
+            assets,
+            validation,
+            orphanedAssets);
+    }
+
+    /// <summary>
+    /// Creates a workspace asset from a local file.
+    /// </summary>
+    public static MdzWorkspaceAsset CreateWorkspaceAssetFromFile(string localFilePath, string? targetPath = null)
+    {
+        if (!File.Exists(localFilePath))
+            throw new FileNotFoundException($"Source file '{localFilePath}' does not exist.", localFilePath);
+
+        var path = NormaliseArchivePath(targetPath ?? Path.GetFileName(localFilePath));
+        var pathError = PathValidator.Validate(path);
+        if (pathError is not null)
+            throw new InvalidOperationException($"ERR_PATH_INVALID: {pathError}");
+
+        var bytes = File.ReadAllBytes(localFilePath);
+        var mimeType = InferMimeType(path);
+        return new MdzWorkspaceAsset(
+            path,
+            Path.GetFileName(path),
+            bytes.LongLength,
+            mimeType,
+            ClassifyAssetKind(path, mimeType),
+            IsPreviewableAsset(path, mimeType),
+            bytes);
+    }
+
+    /// <summary>
+    /// Exports a workspace asset to a local file path.
+    /// </summary>
+    public static void ExportWorkspaceAsset(MdzWorkspaceAsset asset, string outputPath)
+    {
+        var outputDirectory = Path.GetDirectoryName(Path.GetFullPath(outputPath));
+        if (!string.IsNullOrEmpty(outputDirectory))
+            Directory.CreateDirectory(outputDirectory);
+
+        File.WriteAllBytes(outputPath, asset.Bytes);
+    }
+
+    /// <summary>
+    /// Builds an archive from a normalized workspace model.
+    /// </summary>
+    public static MdzPackBuildResult BuildWorkspace(
+        string outputPath,
+        MdzWorkspace workspace,
+        MdzBuildWorkspaceOptions? options = null)
+    {
+        options ??= new MdzBuildWorkspaceOptions();
+        var entryPoint = options.EntryPoint
+            ?? workspace.EntryPoint
+            ?? workspace.Documents.FirstOrDefault(document => document.IsEntryPoint)?.Path
+            ?? workspace.Documents.FirstOrDefault()?.Path;
+        var mode = options.Mode ?? workspace.Mode;
+        var title = options.Title ?? workspace.Title ?? workspace.Manifest?.Title;
+        var metadata = options.Metadata ?? new ManifestEditableMetadata();
+        metadata.Title ??= title;
+        metadata.Mode ??= mode;
+        metadata.EntryPoint ??= entryPoint;
+        var manifest = UpdateManifest(workspace.Manifest, metadata);
+
+        var tempDirectory = Path.Combine(Path.GetTempPath(), $"mdzip-core-workspace-{Guid.NewGuid():N}");
+        Directory.CreateDirectory(tempDirectory);
+
+        try
+        {
+            var files = new List<MdzPackInputFile>();
+            foreach (var document in workspace.Documents)
+            {
+                var tempPath = Path.Combine(tempDirectory, $"{Guid.NewGuid():N}.md");
+                File.WriteAllText(tempPath, document.Text, Encoding.UTF8);
+                files.Add(new MdzPackInputFile(document.Path, tempPath));
+            }
+
+            foreach (var asset in workspace.Assets)
+            {
+                var tempPath = Path.Combine(tempDirectory, $"{Guid.NewGuid():N}.bin");
+                File.WriteAllBytes(tempPath, asset.Bytes);
+                files.Add(new MdzPackInputFile(asset.Path, tempPath));
+            }
+
+            var manifestPath = Path.Combine(tempDirectory, "manifest.json");
+            File.WriteAllText(manifestPath, SerializeManifest(manifest), Encoding.UTF8);
+            files.Add(new MdzPackInputFile(ManifestFileName, manifestPath));
+
+            return BuildArchive(
+                outputPath,
+                files,
+                options.RootName ?? title ?? "MDZip Workspace",
+                new MdzPackOptions
+                {
+                    CreateIndex = false,
+                    MapFiles = false,
+                    Filters = ["**/*", "*"],
+                });
+        }
+        finally
+        {
+            if (Directory.Exists(tempDirectory))
+                Directory.Delete(tempDirectory, recursive: true);
+        }
+    }
+
+    // -------------------------------------------------------------------------
     // Validate
     // -------------------------------------------------------------------------
 
@@ -1546,6 +1704,21 @@ public static class MdzArchive
 
     private static string ResolvePathCase(IEnumerable<string> paths, string candidate) =>
         paths.First(path => path.Equals(candidate, StringComparison.OrdinalIgnoreCase));
+
+    private static string GetDocumentTitle(string path, Manifest? manifest)
+    {
+        if (!string.IsNullOrWhiteSpace(manifest?.EntryPoint)
+            && path.Equals(manifest.EntryPoint, StringComparison.OrdinalIgnoreCase)
+            && !string.IsNullOrWhiteSpace(manifest.Title))
+        {
+            return manifest.Title;
+        }
+
+        return Path.GetFileNameWithoutExtension(path)
+            .Replace('_', ' ')
+            .Replace('-', ' ')
+            .Trim();
+    }
 
     private static Manifest? ReadManifestFromArchive(
         ZipArchive archive,
@@ -2245,3 +2418,58 @@ public sealed record MdzOrphanedAssetsResult(
     IReadOnlyList<string> ReferencedAssetPaths,
     IReadOnlyList<string> OrphanedAssetPaths,
     IReadOnlyList<MdzOrphanedAssetReferenceIssue> UnresolvedReferences);
+
+/// <summary>
+/// Options for opening an archive as a workspace.
+/// </summary>
+public sealed class MdzOpenWorkspaceOptions
+{
+    public bool IncludeOrphanedAssetAnalysis { get; set; }
+    public string OrphanedAssetScanMode { get; set; } = "entrypoint";
+}
+
+/// <summary>
+/// One Markdown document in a workspace.
+/// </summary>
+public sealed record MdzWorkspaceDocument(
+    string Path,
+    string Title,
+    string Text,
+    bool IsEntryPoint);
+
+/// <summary>
+/// One non-Markdown asset in a workspace.
+/// </summary>
+public sealed record MdzWorkspaceAsset(
+    string Path,
+    string FileName,
+    long ByteSize,
+    string MimeType,
+    string Kind,
+    bool IsPreviewable,
+    byte[] Bytes);
+
+/// <summary>
+/// Normalized archive workspace for app/editor hosts.
+/// </summary>
+public sealed record MdzWorkspace(
+    string? Title,
+    string Mode,
+    Manifest? Manifest,
+    string? EntryPoint,
+    IReadOnlyList<MdzWorkspaceDocument> Documents,
+    IReadOnlyList<MdzWorkspaceAsset> Assets,
+    ValidationResult Validation,
+    MdzOrphanedAssetsResult? OrphanedAssets);
+
+/// <summary>
+/// Options for building an archive from a workspace.
+/// </summary>
+public sealed class MdzBuildWorkspaceOptions
+{
+    public string? RootName { get; set; }
+    public ManifestEditableMetadata? Metadata { get; set; }
+    public string? Title { get; set; }
+    public string? Mode { get; set; }
+    public string? EntryPoint { get; set; }
+}
