@@ -200,6 +200,85 @@ public sealed class ManifestFile
     public string? Title { get; set; }
 }
 
+/// <summary>
+/// App-safe manifest metadata fields that can be edited without replacing spec-managed fields.
+/// </summary>
+public sealed class ManifestEditableMetadata
+{
+    [JsonPropertyName("title")]
+    public string? Title { get; set; }
+
+    [JsonPropertyName("author")]
+    public ManifestAuthor? Author { get; set; }
+
+    [JsonPropertyName("description")]
+    public string? Description { get; set; }
+
+    [JsonPropertyName("keywords")]
+    public List<string>? Keywords { get; set; }
+
+    [JsonPropertyName("language")]
+    public string? Language { get; set; }
+
+    [JsonPropertyName("license")]
+    public string? License { get; set; }
+
+    [JsonPropertyName("version")]
+    public string? Version { get; set; }
+
+    [JsonPropertyName("cover")]
+    public string? Cover { get; set; }
+
+    [JsonPropertyName("mode")]
+    public string? Mode { get; set; }
+
+    [JsonPropertyName("entryPoint")]
+    public string? EntryPoint { get; set; }
+}
+
+/// <summary>
+/// Spec-managed manifest fields separated from editable metadata.
+/// </summary>
+public sealed class ManifestReservedFields
+{
+    [JsonPropertyName("spec")]
+    public ManifestSpec? Spec { get; set; }
+
+    [JsonPropertyName("producer")]
+    public ManifestProducer? Producer { get; set; }
+
+    [JsonPropertyName("created")]
+    public string? Created { get; set; }
+
+    [JsonPropertyName("modified")]
+    public string? Modified { get; set; }
+
+    [JsonPropertyName("entryPoint")]
+    public string? EntryPoint { get; set; }
+
+    [JsonPropertyName("mode")]
+    public string? Mode { get; set; }
+
+    [JsonPropertyName("files")]
+    public List<ManifestFile>? Files { get; set; }
+}
+
+/// <summary>
+/// Result of splitting a manifest into reserved and editable metadata.
+/// </summary>
+public sealed record ManifestMetadataSplit(
+    ManifestReservedFields Reserved,
+    ManifestEditableMetadata Editable);
+
+/// <summary>
+/// Timestamp controls for manifest creation and updates.
+/// </summary>
+public sealed class ManifestUpdateOptions
+{
+    public bool SetCreatedIfMissing { get; set; } = true;
+    public bool RefreshModified { get; set; } = true;
+}
+
 internal sealed class TimestampStringOrObjectConverter : JsonConverter<string?>
 {
     public override string? Read(ref Utf8JsonReader reader, Type typeToConvert, JsonSerializerOptions options)

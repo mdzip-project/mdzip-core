@@ -50,6 +50,12 @@ public static class MdzArchive
         AllowTrailingCommas = false,
     };
 
+    private static readonly JsonSerializerOptions WriteJsonOptions = new()
+    {
+        WriteIndented = true,
+        DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
+    };
+
     private static readonly JsonDocumentOptions StrictJsonDocumentOptions = new()
     {
         CommentHandling = JsonCommentHandling.Disallow,
@@ -485,6 +491,109 @@ public static class MdzArchive
         using var stream = manifestEntry.Open();
         return JsonSerializer.Deserialize<Manifest>(stream, JsonOptions);
     }
+
+    /// <summary>
+    /// Creates a canonical manifest from editable metadata.
+    /// </summary>
+    public static Manifest CreateManifest(ManifestEditableMetadata? metadata = null)
+    {
+        var manifest = new Manifest();
+        ApplyManifestMetadata(manifest, metadata);
+        EnsureCanonicalManifest(manifest);
+        return manifest;
+    }
+
+    /// <summary>
+    /// Updates a manifest while preserving spec-managed fields unless metadata explicitly changes them.
+    /// </summary>
+    public static Manifest UpdateManifest(
+        Manifest? manifest,
+        ManifestEditableMetadata? metadata = null,
+        ManifestUpdateOptions? options = null)
+    {
+        var next = manifest is null ? new Manifest() : CloneManifest(manifest);
+        EnsureCanonicalManifest(next, options);
+
+        if (metadata is not null)
+            ApplyManifestMetadata(next, metadata);
+
+        EnsureCanonicalManifest(next, options);
+        return next;
+    }
+
+    /// <summary>
+    /// Updates manifest.json in an archive atomically and returns the manifest that was written.
+    /// </summary>
+    public static Manifest UpdateManifest(
+        string archivePath,
+        ManifestEditableMetadata? metadata,
+        ManifestUpdateOptions? options = null)
+    {
+        if (!File.Exists(archivePath))
+            throw new FileNotFoundException($"Archive '{archivePath}' does not exist.", archivePath);
+
+        Manifest? updatedManifest = null;
+        CreateAtomic(archivePath, destinationArchive =>
+        {
+            using var sourceArchive = ZipFile.OpenRead(archivePath);
+            var sourceEntries = sourceArchive.Entries
+                .Where(e => !string.IsNullOrEmpty(e.Name))
+                .ToList();
+            var currentManifest = ReadManifestFromArchive(
+                sourceArchive,
+                replacedOrRemovedPath: string.Empty,
+                localManifestPath: null,
+                requireValidReplacementManifest: false,
+                requireValidExistingManifest: true);
+
+            updatedManifest = UpdateManifest(currentManifest, metadata, options);
+            var archivePaths = sourceEntries
+                .Select(entry => entry.FullName.Replace('\\', '/'))
+                .Where(path => !path.Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase))
+                .ToList();
+            EnsureCreatableEntryPoint(archivePaths, updatedManifest);
+
+            foreach (var sourceEntry in sourceEntries)
+            {
+                var sourcePath = sourceEntry.FullName.Replace('\\', '/');
+                if (sourcePath.Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase))
+                    continue;
+
+                CopyEntry(sourceEntry, destinationArchive);
+            }
+
+            WriteManifestEntry(destinationArchive, SerializeManifest(updatedManifest));
+        });
+
+        return updatedManifest!;
+    }
+
+    /// <summary>
+    /// Splits a manifest into spec-managed fields and editable metadata.
+    /// </summary>
+    public static ManifestMetadataSplit SplitManifestMetadata(Manifest manifest) =>
+        new(
+            new ManifestReservedFields
+            {
+                Spec = manifest.Spec,
+                Producer = manifest.Producer,
+                Created = manifest.Created,
+                Modified = manifest.Modified,
+                EntryPoint = manifest.EntryPoint,
+                Mode = manifest.Mode,
+                Files = manifest.Files,
+            },
+            new ManifestEditableMetadata
+            {
+                Title = manifest.Title,
+                Author = manifest.Author,
+                Description = manifest.Description,
+                Keywords = manifest.Keywords,
+                Language = manifest.Language,
+                License = manifest.License,
+                Version = manifest.Version,
+                Cover = manifest.Cover,
+            });
 
     /// <summary>
     /// Resolves the entry point Markdown file for the archive per Section 5.5.
@@ -1033,6 +1142,52 @@ public static class MdzArchive
 
         using var fileStream = File.OpenRead(localFilePath);
         fileStream.CopyTo(entryStream);
+    }
+
+    private static Manifest CloneManifest(Manifest manifest)
+    {
+        var json = JsonSerializer.Serialize(manifest, WriteJsonOptions);
+        return JsonSerializer.Deserialize<Manifest>(json, JsonOptions)
+            ?? throw new InvalidOperationException("Manifest clone failed.");
+    }
+
+    private static string SerializeManifest(Manifest manifest) =>
+        JsonSerializer.Serialize(manifest, WriteJsonOptions);
+
+    private static void EnsureCanonicalManifest(Manifest manifest, ManifestUpdateOptions? options = null)
+    {
+        options ??= new ManifestUpdateOptions();
+
+        manifest.Spec ??= new ManifestSpec();
+        manifest.Spec.Name ??= SpecName;
+        manifest.Spec.Version ??= ProducedSpecVersion;
+
+        if (options.SetCreatedIfMissing && string.IsNullOrWhiteSpace(manifest.Created))
+            manifest.Created = DateTime.UtcNow.ToString("o");
+
+        if (options.RefreshModified)
+            manifest.Modified = DateTime.UtcNow.ToString("o");
+    }
+
+    private static void ApplyManifestMetadata(Manifest manifest, ManifestEditableMetadata? metadata)
+    {
+        if (metadata is null)
+            return;
+
+        if (metadata.Title is not null) manifest.Title = metadata.Title;
+        if (metadata.Author is not null)
+        {
+            manifest.Author = metadata.Author;
+            manifest.Authors = [metadata.Author];
+        }
+        if (metadata.Description is not null) manifest.Description = metadata.Description;
+        if (metadata.Keywords is not null) manifest.Keywords = metadata.Keywords;
+        if (metadata.Language is not null) manifest.Language = metadata.Language;
+        if (metadata.License is not null) manifest.License = metadata.License;
+        if (metadata.Version is not null) manifest.Version = metadata.Version;
+        if (metadata.Cover is not null) manifest.Cover = metadata.Cover;
+        if (metadata.Mode is not null) manifest.Mode = metadata.Mode;
+        if (metadata.EntryPoint is not null) manifest.EntryPoint = metadata.EntryPoint;
     }
 
     /// <summary>
