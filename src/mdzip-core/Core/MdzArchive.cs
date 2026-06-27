@@ -26,6 +26,19 @@ public static class MdzArchive
     private const string SpecName = "markdownzip-spec";
     private const string ProducedSpecVersion = "1.1.0-draft";
     private const int SupportedMajorVersion = 1;
+    private static readonly IReadOnlyDictionary<string, string> ImageMimeTypes =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["png"] = "image/png",
+            ["jpg"] = "image/jpeg",
+            ["jpeg"] = "image/jpeg",
+            ["gif"] = "image/gif",
+            ["webp"] = "image/webp",
+            ["svg"] = "image/svg+xml",
+            ["avif"] = "image/avif",
+            ["ico"] = "image/x-icon",
+        };
+
     private static readonly Regex SemVerRegex = new(
         @"^(?<major>0|[1-9]\d*)\.(?<minor>0|[1-9]\d*)\.(?<patch>0|[1-9]\d*)(?:-(?<prerelease>(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+(?<build>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
@@ -389,6 +402,25 @@ public static class MdzArchive
     }
 
     /// <summary>
+    /// Returns true when a file or directory entry exists in the archive.
+    /// </summary>
+    public static bool HasEntry(string archivePath, string archiveEntryPath)
+    {
+        using var archive = ZipFile.OpenRead(archivePath);
+        return FindEntryWithDirectoryFallback(archive, archiveEntryPath) is not null;
+    }
+
+    /// <summary>
+    /// Finds a file or directory entry by archive path using case-insensitive lookup.
+    /// </summary>
+    public static ArchiveEntry? FindEntry(string archivePath, string archiveEntryPath)
+    {
+        using var archive = ZipFile.OpenRead(archivePath);
+        var entry = FindEntryWithDirectoryFallback(archive, archiveEntryPath);
+        return entry is null ? null : ToArchiveEntry(entry);
+    }
+
+    /// <summary>
     /// Returns detailed entry information for all files in the archive.
     /// </summary>
     public static IReadOnlyList<ArchiveEntry> ListDetailed(string archivePath)
@@ -396,13 +428,44 @@ public static class MdzArchive
         using var archive = ZipFile.OpenRead(archivePath);
         return archive.Entries
             .Where(e => !string.IsNullOrEmpty(e.Name))
-            .Select(e => new ArchiveEntry(
-                e.FullName.Replace('\\', '/'),
-                e.Length,
-                e.CompressedLength,
-                e.LastWriteTime.UtcDateTime))
+            .Select(ToArchiveEntry)
             .OrderBy(e => e.Path, StringComparer.OrdinalIgnoreCase)
             .ToList();
+    }
+
+    /// <summary>
+    /// Builds an inferred folder tree from all file paths in the archive.
+    /// </summary>
+    public static IReadOnlyList<PathTreeNode> BuildPathTree(string archivePath) =>
+        BuildPathTree(List(archivePath));
+
+    /// <summary>
+    /// Builds an inferred folder tree from archive-relative paths.
+    /// </summary>
+    public static IReadOnlyList<PathTreeNode> BuildPathTree(IEnumerable<string> paths)
+    {
+        var roots = new List<PathTreeNode>();
+
+        foreach (var archivePath in SortArchivePaths(paths))
+        {
+            var parts = archivePath
+                .Split('/', StringSplitOptions.RemoveEmptyEntries)
+                .ToArray();
+            var siblings = roots;
+            var currentPath = string.Empty;
+
+            for (var i = 0; i < parts.Length; i++)
+            {
+                var part = parts[i];
+                currentPath = string.IsNullOrEmpty(currentPath) ? part : $"{currentPath}/{part}";
+                var isDirectory = i < parts.Length - 1;
+                var node = EnsureTreeNode(siblings, part, currentPath, isDirectory);
+                siblings = node.Children;
+            }
+        }
+
+        SortTreeNodes(roots);
+        return roots;
     }
 
     // -------------------------------------------------------------------------
@@ -448,6 +511,64 @@ public static class MdzArchive
         }
 
         return ResolveEntryPoint(archive, manifest);
+    }
+
+    /// <summary>
+    /// Resolves the archive interpretation mode from the manifest, defaulting to document mode.
+    /// </summary>
+    public static string ResolveMode(string archivePath)
+    {
+        var manifest = ReadManifest(archivePath);
+        return manifest?.Mode ?? "document";
+    }
+
+    /// <summary>
+    /// Reads UTF-8 text content from an archive entry.
+    /// </summary>
+    public static string ReadText(string archivePath, string archiveEntryPath)
+    {
+        using var archive = ZipFile.OpenRead(archivePath);
+        var entry = GetFileEntryOrThrow(archive, archiveEntryPath);
+        using var stream = entry.Open();
+        using var reader = new StreamReader(stream, Encoding.UTF8);
+        return reader.ReadToEnd();
+    }
+
+    /// <summary>
+    /// Reads raw bytes from an archive entry.
+    /// </summary>
+    public static byte[] ReadBytes(string archivePath, string archiveEntryPath)
+    {
+        using var archive = ZipFile.OpenRead(archivePath);
+        var entry = GetFileEntryOrThrow(archive, archiveEntryPath);
+        using var stream = entry.Open();
+        using var memory = new MemoryStream();
+        stream.CopyTo(memory);
+        return memory.ToArray();
+    }
+
+    /// <summary>
+    /// Reads entry content as raw base64 with no data URI prefix.
+    /// </summary>
+    public static string ReadBase64(string archivePath, string archiveEntryPath) =>
+        Convert.ToBase64String(ReadBytes(archivePath, archiveEntryPath));
+
+    /// <summary>
+    /// Reads entry content and returns a data URI string.
+    /// </summary>
+    public static string ReadDataUri(
+        string archivePath,
+        string archiveEntryPath,
+        string? fallbackMime = null)
+    {
+        var normalisedPath = NormaliseArchivePath(archiveEntryPath);
+        var extension = Path.GetExtension(normalisedPath).TrimStart('.').ToLowerInvariant();
+        var mime = ImageMimeTypes.TryGetValue(extension, out var imageMime)
+            ? imageMime
+            : string.IsNullOrWhiteSpace(fallbackMime)
+                ? "application/octet-stream"
+                : fallbackMime.Trim();
+        return $"data:{mime};base64,{ReadBase64(archivePath, normalisedPath)}";
     }
 
     // -------------------------------------------------------------------------
@@ -612,11 +733,92 @@ public static class MdzArchive
     // Helpers
     // -------------------------------------------------------------------------
 
+    private static string NormaliseArchivePath(string path) =>
+        (path ?? string.Empty).Replace('\\', '/').TrimStart('/');
+
+    private static IReadOnlyList<string> SortArchivePaths(IEnumerable<string> paths) =>
+        paths
+            .Select(NormaliseArchivePath)
+            .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+    private static ArchiveEntry ToArchiveEntry(ZipArchiveEntry entry)
+    {
+        var isDirectory = IsDirectoryEntry(entry);
+        return new ArchiveEntry(
+            entry.FullName.Replace('\\', '/'),
+            isDirectory ? 0 : entry.Length,
+            isDirectory ? 0 : entry.CompressedLength,
+            entry.LastWriteTime.UtcDateTime,
+            isDirectory,
+            !isDirectory && IsMarkdownPath(entry.FullName),
+            !isDirectory && IsImagePath(entry.FullName));
+    }
+
     private static ZipArchiveEntry? FindEntry(ZipArchive archive, string path)
     {
-        var normalised = path.Replace('\\', '/');
+        var normalised = NormaliseArchivePath(path);
         return archive.Entries.FirstOrDefault(e =>
             e.FullName.Replace('\\', '/').Equals(normalised, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static ZipArchiveEntry? FindEntryWithDirectoryFallback(ZipArchive archive, string path)
+    {
+        var normalised = NormaliseArchivePath(path);
+        var direct = FindEntry(archive, normalised);
+        if (direct is not null)
+            return direct;
+
+        return normalised.EndsWith("/", StringComparison.Ordinal)
+            ? FindEntry(archive, normalised.TrimEnd('/'))
+            : FindEntry(archive, $"{normalised}/");
+    }
+
+    private static ZipArchiveEntry GetFileEntryOrThrow(ZipArchive archive, string path)
+    {
+        var normalised = NormaliseArchivePath(path);
+        var entry = FindEntryWithDirectoryFallback(archive, normalised);
+        if (entry is null)
+            throw new FileNotFoundException($"Entry '{normalised}' was not found in archive.", normalised);
+
+        if (IsDirectoryEntry(entry))
+            throw new InvalidOperationException($"Entry '{normalised}' is a directory.");
+
+        return entry;
+    }
+
+    private static bool IsDirectoryEntry(ZipArchiveEntry entry) =>
+        string.IsNullOrEmpty(entry.Name) || entry.FullName.EndsWith("/", StringComparison.Ordinal);
+
+    private static PathTreeNode EnsureTreeNode(
+        List<PathTreeNode> siblings,
+        string name,
+        string path,
+        bool isDirectory)
+    {
+        var existing = siblings.FirstOrDefault(node =>
+            node.IsDirectory == isDirectory
+            && node.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+        if (existing is not null)
+            return existing;
+
+        var node = new PathTreeNode(name, path, isDirectory, []);
+        siblings.Add(node);
+        return node;
+    }
+
+    private static void SortTreeNodes(List<PathTreeNode> nodes)
+    {
+        nodes.Sort((left, right) =>
+        {
+            if (left.IsDirectory != right.IsDirectory)
+                return left.IsDirectory ? -1 : 1;
+
+            return StringComparer.OrdinalIgnoreCase.Compare(left.Name, right.Name);
+        });
+
+        foreach (var node in nodes)
+            SortTreeNodes(node.Children);
     }
 
     private static string? ResolveEntryPoint(ZipArchive archive, Manifest? manifest = null)
@@ -721,6 +923,13 @@ public static class MdzArchive
     private static bool IsMarkdownPath(string path) =>
         path.EndsWith(".md", StringComparison.OrdinalIgnoreCase)
         || path.EndsWith(".markdown", StringComparison.OrdinalIgnoreCase);
+
+    private static bool IsImagePath(string path)
+    {
+        var extension = Path.GetExtension(path).TrimStart('.').ToLowerInvariant();
+        return extension is "png" or "jpg" or "jpeg" or "gif" or "webp" or "bmp" or "ico"
+            or "webm" or "mp4" or "mp3" or "wav" or "ogg";
+    }
 
     private static bool IsSupportedMode(string mode) =>
         mode is "document" or "project";
@@ -1026,4 +1235,20 @@ public static class MdzArchive
 /// <summary>
 /// Detailed information about a single archive entry.
 /// </summary>
-public record ArchiveEntry(string Path, long Size, long CompressedSize, DateTime LastModified);
+public record ArchiveEntry(
+    string Path,
+    long Size,
+    long CompressedSize,
+    DateTime LastModified,
+    bool IsDirectory = false,
+    bool IsMarkdown = false,
+    bool IsImage = false);
+
+/// <summary>
+/// Inferred archive path tree node for navigation and inspection.
+/// </summary>
+public sealed record PathTreeNode(
+    string Name,
+    string Path,
+    bool IsDirectory,
+    List<PathTreeNode> Children);

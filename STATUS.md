@@ -1,5 +1,5 @@
 Status: idle
-Last: Committed net10 multi-target (net8.0;net10.0) + bump to v1.2.0
+Last: Committed core parity Phase 1 read/inspect APIs
 
 <!-- Dashboard reads these two lines.
      Status: idle | in-progress | awaiting-test | ready-to-commit | blocked
