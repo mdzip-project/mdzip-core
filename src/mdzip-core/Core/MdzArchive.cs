@@ -1656,6 +1656,21 @@ public static class MdzArchive
             references.Add(target);
         }
 
+        // Raw HTML <img src> tags aren't part of the markdown image syntax above,
+        // but authors use them for sizing/alignment control markdown can't express.
+        foreach (Match match in Regex.Matches(
+            markdown,
+            @"<img\b[^>]*\ssrc\s*=\s*(?:""(?<dq>[^""]*)""|'(?<sq>[^']*)'|(?<uq>[^\s""'>]+))[^>]*>",
+            RegexOptions.CultureInvariant | RegexOptions.IgnoreCase))
+        {
+            var target = match.Groups["dq"].Success ? match.Groups["dq"].Value
+                : match.Groups["sq"].Success ? match.Groups["sq"].Value
+                : match.Groups["uq"].Value;
+            target = target.Trim();
+            if (target.Length > 0)
+                references.Add(target);
+        }
+
         return references;
     }
 

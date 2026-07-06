@@ -65,6 +65,42 @@ public class AssetParityTests
     }
 
     [Fact]
+    public void FindOrphanedAssets_RecognizesRawHtmlImgTagReferences()
+    {
+        var archivePath = TestFixtureHelper.CreateTempArchive(new Dictionary<string, string>
+        {
+            ["index.md"] = """
+            <img src="assets/sized.png" width="200">
+            <img src='assets/single-quoted.png' />
+            ![md](assets/markdown.png)
+            """,
+            ["assets/sized.png"] = "sized",
+            ["assets/single-quoted.png"] = "single-quoted",
+            ["assets/markdown.png"] = "markdown",
+            ["assets/orphan.png"] = "orphan",
+            ["manifest.json"] = """
+            {
+              "entryPoint": "index.md"
+            }
+            """
+        });
+
+        try
+        {
+            var result = MdzArchive.FindOrphanedAssets(archivePath);
+
+            Assert.Contains("assets/sized.png", result.ReferencedAssetPaths);
+            Assert.Contains("assets/single-quoted.png", result.ReferencedAssetPaths);
+            Assert.Contains("assets/markdown.png", result.ReferencedAssetPaths);
+            Assert.Equal(["assets/orphan.png"], result.OrphanedAssetPaths);
+        }
+        finally
+        {
+            File.Delete(archivePath);
+        }
+    }
+
+    [Fact]
     public void FindOrphanedAssets_AllMarkdownModeScansEveryMarkdownFile()
     {
         var archivePath = TestFixtureHelper.CreateTempArchive(new Dictionary<string, string>

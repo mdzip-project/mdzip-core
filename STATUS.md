@@ -1,5 +1,5 @@
 Status: idle
-Last: Published mdzip-core 1.3.0
+Last: Committed 1.3.3 — orphan detection recognizes raw HTML <img src> refs
 
 <!-- Dashboard reads these two lines.
      Status: idle | in-progress | awaiting-test | ready-to-commit | blocked
