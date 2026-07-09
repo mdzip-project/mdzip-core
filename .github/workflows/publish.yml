@@ -10,6 +10,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write  # enables OIDC token issuance for NuGet Trusted Publishing
 
 env:
   DOTNET_VERSION: '10.0.x'
@@ -75,17 +76,17 @@ jobs:
       - name: Pack
         run: dotnet pack ${{ env.PROJECT_PATH }} --configuration Release -o out -p:Version=${{ steps.version.outputs.version }} --no-build
 
+      - name: NuGet login (OIDC -> temp API key)
+        uses: NuGet/login@v1
+        id: nuget_login
+        with:
+          user: ${{ secrets.NUGET_USER }}
+
       - name: Publish package to NuGet.org
-        env:
-          NUGET_API_KEY: ${{ secrets.NUGET_API_KEY }}
         run: |
-          if [[ -z "$NUGET_API_KEY" ]]; then
-            echo "NUGET_API_KEY is not configured. Add it in repository Settings > Secrets and variables > Actions."
-            exit 1
-          fi
           dotnet nuget push out/*.nupkg \
             --source "https://api.nuget.org/v3/index.json" \
-            --api-key "$NUGET_API_KEY" \
+            --api-key "${{ steps.nuget_login.outputs.NUGET_API_KEY }}" \
             --skip-duplicate
 
       - name: Create GitHub Release
