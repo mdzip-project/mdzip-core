@@ -1,7 +1,12 @@
-# mdzip-core
+# MDZip.Core
 Core .NET library for working with `.mdz` archives.
 
-`mdzip-core` provides APIs to:
+> Formerly published as `mdzip-core`. The package was renamed to
+> `MDZip.Core` starting with version 1.4.0 to match the `MDZip.*`
+> NuGet ID scheme; `mdzip-core` is deprecated but remains listed for
+> back-compat.
+
+`MDZip.Core` provides APIs to:
 - create `.mdz` archives from folders or explicit file mappings
 - extract archives safely
 - list archive contents
@@ -10,16 +15,16 @@ Core .NET library for working with `.mdz` archives.
 - validate archives against path and manifest rules
 
 ## Package Info
-- Package ID: `mdzip-core`
-- Target framework: `.NET 8`
-- Output assembly: `mdzip.core.dll`
+- Package ID: `MDZip.Core`
+- Target frameworks: `.NET 8`, `.NET 10`
+- Output assembly: `MDZip.Core.dll`
 - Main namespace: `MDZip.Core`
 
 ## Installation (NuGet.org)
 Install the package from NuGet.org:
 
 ```bash
-dotnet add package mdzip-core
+dotnet add package MDZip.Core
 ```
 
 ## Quick Start

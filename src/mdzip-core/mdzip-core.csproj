@@ -4,17 +4,19 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
 
-    <AssemblyName>mdzip.core</AssemblyName>
+    <AssemblyName>MDZip.Core</AssemblyName>
     <RootNamespace>MDZip.Core</RootNamespace>
 
-    <PackageId>mdzip-core</PackageId>
+    <PackageId>MDZip.Core</PackageId>
     <Description>Core library assembly for the .mdz format.</Description>
-    <Authors>mdz</Authors>
+    <Authors>MDZip Project</Authors>
     <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageLicenseExpression>Apache-2.0</PackageLicenseExpression>
+    <PackageIcon>icon.png</PackageIcon>
+    <PackageProjectUrl>https://mdzip.org</PackageProjectUrl>
     <RepositoryUrl>https://github.com/mdzip-project/mdzip-core</RepositoryUrl>
 
-    <!-- Package version is pinned to the supported markdownzip spec version. -->
-    <Version>1.3.3</Version>
+    <Version>1.4.0</Version>
     <PackageVersion>$(Version)</PackageVersion>
 
     <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
@@ -22,5 +24,6 @@
 
   <ItemGroup>
     <None Include="..\..\README.md" Pack="true" PackagePath="\" Link="README.md" />
+    <None Include="..\..\icon.png" Pack="true" PackagePath="\" Link="icon.png" />
   </ItemGroup>
 </Project>
