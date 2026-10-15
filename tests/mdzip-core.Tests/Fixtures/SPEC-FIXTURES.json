@@ -1,0 +1,28 @@
+{
+  "source": "https://github.com/mdzip-project/mdzip-spec",
+  "ref": "v1.2.0",
+  "commit": "dfa3947d5d3abc4e48e532860e84c2b6a81336ba",
+  "note": "Copied by mdzip-spec tools/sync-fixtures.mjs. Do not edit these files by hand; add implementation-specific cases in separate files.",
+  "files": {
+    "archive-cases.json": "e24eb05b016d1f39a73e208dc09591894fa7f1acaa5dc2151a8340f673e91452",
+    "create-filter-cases.json": "cdf9a9cb17e9c8094d47aa4b49e9f1f78b58340aa2ff53fb06f02120be8b75f5",
+    "entry-set-cases.json": "0e7ae6323686124d5cda2a135593646b3eebe1f629b5edba0618cf01951532a2",
+    "entrypoint-cases.json": "29437c12efbd934cfbbb3031156a975806f8d82fd6fbde10ae381d72d82dd4cd",
+    "hostile-content-cases.json": "be7b910f32ccdf85a25cbe56e4eb309b1fb923e7edfa4110acd96fccf51434bf",
+    "hostile-content.mdz": "0ceb5a6f3bc0ef8410d33c534faac0a7e16a9b98c0115f8a96c1335d7330d0bb",
+    "invalid-bad-entrypoint.mdz": "6ed99f65eeb53afe1d2f7ac73cf45562eefc238d7ab111aef14337594e60ad22",
+    "invalid-missing-index.mdz": "5eff67350b6aa92777001e33f6c70bd6a74b58c615dcdf67b0265b90ccd2588f",
+    "line-endings-crlf.mdz": "20fce978e1c09ff3e6966b47f0c6d9acd3063591217abb6b35c2794e5211caa3",
+    "link-resolution-cases.json": "25f2357d695cd85fd568845d244eca01d360e58592cba38463856d6d347f71a9",
+    "manifest-cases.json": "77b16b09a1bdf665b33e6181d4e1954df966361d1d187ea81b37cdc2e2b1414d",
+    "minimal.mdz": "e22527d1f2b4e0da69e099d9577fde67627fb24998bc14519e25ced3fad7af79",
+    "path-matching-cases.json": "25724955a0d375e9e545fbe56bb3626d96a1852f84deb62e5a02115ba6250a17",
+    "path-validation-cases.json": "0f11968d6ccfda1e6b8263421178d96a297f51c3a58250851690aea0c7289133",
+    "project-mode.mdz": "36573a40fcfe0e25eb304594e3f66904ae565e5c68a472e6cfe8244b9574cb98",
+    "round-trip-expectations.json": "a3495077c04b9084d06ae2c8184cce24161965204e3556196c8ea865ab5fc61b",
+    "round-trip.mdz": "b8165e0417ebf4dbbf0215c541f9101866210c61714a287a553d843cde6a80fc",
+    "symlink-entries.mdz": "060b05651fca88021b59ad976d16b1ab49e8dbcb523fe29e984fb218e8986d67",
+    "unsupported-compression.mdz": "108e279500ae6cf42e8c0e855a60787501a6239c43b9966b6f175107d5f17cd3",
+    "with-manifest.mdz": "95f1959bfae54213081467f660d4934535e493d0f428698b0603f4aacb219447"
+  }
+}

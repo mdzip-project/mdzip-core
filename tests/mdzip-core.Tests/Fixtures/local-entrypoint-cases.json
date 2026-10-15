@@ -1,0 +1,15 @@
+[
+  {
+    "name": "non-markdown manifest entryPoint is invalid, with no fallback to index.md (spec 1.2.0)",
+    "files": [
+      "index.md",
+      "assets/cover.png",
+      "manifest.json"
+    ],
+    "manifest": {
+      "entryPoint": "assets/cover.png"
+    },
+    "expectedEntryPoint": null,
+    "expectedError": "ERR_ENTRYPOINT_INVALID"
+  }
+]

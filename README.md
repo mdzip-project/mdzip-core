@@ -38,10 +38,9 @@ MdzArchive.Create(
     sourceDirectory: "content",
     manifest: new Manifest
     {
-        Spec = new ManifestSpec { Name = "markdownzip-spec", Version = "1.1.0-draft" },
         Title = "My Document",
         EntryPoint = "index.md"
-    });
+    }); // spec.version, mode and timestamps are filled in
 
 // Validate
 var result = MdzArchive.Validate("book.mdz");
@@ -79,14 +78,19 @@ Additional types:
 - `PathValidator`
 - `Manifest`, `ManifestSpec`, `ManifestAuthor`, `ManifestProducer`, `ManifestAgent`, `ManifestFile`
 
-## Notes on Validation Behavior
-- Entry paths are validated for traversal attempts and OS-reserved characters.
-- `manifest.json` is optional, but if present it is parsed and validated.
-- Supported manifest `spec.version` major version is `1` (when present).
-- Entry point resolution order:
-1. `manifest.entryPoint` (must reference a `.md` or `.markdown` file)
-2. root `index.md`
-3. exactly one root markdown file (`.md` or `.markdown`)
+## Spec 1.2.0 behaviour
+
+Version 2.0.0 implements MDZip spec [1.2.0](https://github.com/mdzip-project/mdzip-spec/releases/tag/v1.2.0) and runs its shared fixtures (`tests/mdzip-core.Tests/Fixtures`, synced with `mdzip-spec/tools/sync-fixtures.mjs --ref v1.2.0`). Things to know when upgrading from 1.x:
+
+- **Paths are case-sensitive** after Unicode NFC normalization (§5.4.1): `Index.md` no longer finds `index.md`. `MdzArchive.FindCaseOnlyMatch` suggests the near match after a failed lookup.
+- **Every read checks the container first**: encrypted entries (`ERR_ZIP_ENCRYPTED`), compression methods other than stored/DEFLATE (`ERR_ZIP_INVALID`), two entries equal after NFC (`ERR_DUPLICATE_PATH`) and a file that is also a directory (`ERR_PATH_CONFLICT`) throw.
+- **Symbolic link entries** are skipped and never followed: they're not listed, can't be read or extracted, are listed by `ListSpecialFiles` and reported by `Validate`. Mutations keep them unless `dropSpecialFiles: true`.
+- **Entry point** (§5.5): `manifest.entryPoint` (invalid → `ERR_ENTRYPOINT_INVALID`, missing file → `ERR_ENTRYPOINT_MISSING`, never a fallback); else root `index.md`; else the single root Markdown file once support files (README, AGENTS, LICENSE, CHANGELOG, CONTRIBUTING) are set aside. `ResolveEntryPoint` returns null when there is none; `ResolveEntryPointStrict` says why.
+- **Manifests** (§6.4): an invalid critical field (`spec`, `spec.version`, `mode`, `entryPoint`) is an error; an invalid descriptive field is ignored — left out of `ReadManifest` and reported as a `Validate` warning. `null` counts as a wrong type.
+- **Producers always write `manifest.json`** with `spec.version` `1.2.0`, `entryPoint` and `mode`. Edits (`AddFile`, `RemoveFile`, `UpdateFiles`, `UpdateManifest`) keep every existing manifest field, nested unknown ones included, add a manifest to an archive without one, and throw `ERR_ENTRYPOINT_CHANGED` if a change would move the entry point.
+- **Line endings**: only Markdown files and `manifest.json` are normalized to LF when written (§12.2).
+- **Errors** are `InvalidOperationException`s whose message starts with the spec code; `MdzSpec.ErrorCode(ex)` reads it.
+- The rules are public too: `MdzSpec` (paths, entry point, manifest checks) and `MdzLinks.ResolveLink` (links inside, out of and into archives, §9.3–9.6).
 
 ## Development
 Build locally:

@@ -22,8 +22,8 @@ public class ManifestEditingParityTests
         Assert.Equal("document", manifest.Mode);
         Assert.Equal("Author", manifest.Author?.Name);
         Assert.Single(manifest.Authors!);
-        Assert.Equal("markdownzip-spec", manifest.Spec?.Name);
-        Assert.Equal("1.1.0-draft", manifest.Spec?.Version);
+        Assert.Equal("mdzip-spec", manifest.Spec?.Name);
+        Assert.Equal("1.2.0", manifest.Spec?.Version);
         Assert.False(string.IsNullOrWhiteSpace(manifest.Created));
         Assert.False(string.IsNullOrWhiteSpace(manifest.Modified));
     }

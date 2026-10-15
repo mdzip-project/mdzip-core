@@ -7,7 +7,7 @@ namespace MDZip.Core.Tests;
 public class ReadInspectParityTests
 {
     [Fact]
-    public void HasEntry_AndFindEntry_UseCaseInsensitiveLookupAndDirectoryFallback()
+    public void HasEntry_AndFindEntry_AreCaseSensitiveWithDirectoryFallback()
     {
         var archive = CreateArchive(
             textEntries: new Dictionary<string, string>
@@ -19,10 +19,13 @@ public class ReadInspectParityTests
 
         try
         {
-            Assert.True(MdzArchive.HasEntry(archive, "/docs/chapter.md"));
+            // Spec 1.2.0 §5.4.1: lookups are case-sensitive after NFC; a case-only match is only suggested.
+            Assert.False(MdzArchive.HasEntry(archive, "/docs/chapter.md"));
+            Assert.Equal("docs/Chapter.md", MdzArchive.FindCaseOnlyMatch(archive, "DOCS/CHAPTER.MD"));
+            Assert.True(MdzArchive.HasEntry(archive, "/docs/Chapter.md"));
             Assert.True(MdzArchive.HasEntry(archive, "assets"));
 
-            var entry = MdzArchive.FindEntry(archive, "DOCS/CHAPTER.MD");
+            var entry = MdzArchive.FindEntry(archive, "docs/Chapter.md");
             Assert.NotNull(entry);
             Assert.Equal("docs/Chapter.md", entry.Path);
             Assert.True(entry.IsMarkdown);
@@ -54,7 +57,8 @@ public class ReadInspectParityTests
 
         try
         {
-            Assert.Equal("# Hello\r\n", MdzArchive.ReadText(archive, "INDEX.md"));
+            Assert.Equal("# Hello\r\n", MdzArchive.ReadText(archive, "index.md"));
+            Assert.Throws<FileNotFoundException>(() => MdzArchive.ReadText(archive, "INDEX.md"));
             Assert.Equal([0x89, 0x50, 0x4e, 0x47], MdzArchive.ReadBytes(archive, "/assets/cover.png"));
             Assert.Equal("AQID", MdzArchive.ReadBase64(archive, "assets/raw.bin"));
             Assert.Equal("data:image/png;base64,iVBORw==", MdzArchive.ReadDataUri(archive, "assets/cover.png"));

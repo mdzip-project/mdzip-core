@@ -23,9 +23,6 @@ public sealed class ValidationResult
 public static class MdzArchive
 {
     private const string ManifestFileName = "manifest.json";
-    private const string SpecName = "markdownzip-spec";
-    private const string ProducedSpecVersion = "1.1.0-draft";
-    private const int SupportedMajorVersion = 1;
     private static readonly IReadOnlyDictionary<string, string> ImageMimeTypes =
         new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
         {
@@ -63,10 +60,6 @@ public static class MdzArchive
             ["pdf"] = "application/pdf",
         };
 
-    private static readonly Regex SemVerRegex = new(
-        @"^(?<major>0|[1-9]\d*)\.(?<minor>0|[1-9]\d*)\.(?<patch>0|[1-9]\d*)(?:-(?<prerelease>(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+(?<build>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
-
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         PropertyNameCaseInsensitive = true,
@@ -80,18 +73,14 @@ public static class MdzArchive
         DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
     };
 
-    private static readonly JsonDocumentOptions StrictJsonDocumentOptions = new()
-    {
-        CommentHandling = JsonCommentHandling.Disallow,
-        AllowTrailingCommas = false,
-    };
-
     // -------------------------------------------------------------------------
     // Create
     // -------------------------------------------------------------------------
 
     /// <summary>
-    /// Creates a .mdz archive from a source directory.
+    /// Creates a .mdz archive from a source directory. A conforming producer always writes
+    /// manifest.json (§14.1): <paramref name="manifest"/>, else the directory's own manifest.json,
+    /// else a minimal one titled after the directory.
     /// </summary>
     public static void Create(
         string outputPath,
@@ -101,148 +90,83 @@ public static class MdzArchive
         if (!Directory.Exists(sourceDirectory))
             throw new ArgumentException($"Source directory '{sourceDirectory}' does not exist.", nameof(sourceDirectory));
 
-        var allFiles = Directory.EnumerateFiles(sourceDirectory, "*", SearchOption.AllDirectories).ToList();
-        var archivePaths = new List<string>();
+        var files = Directory.EnumerateFiles(sourceDirectory, "*", SearchOption.AllDirectories)
+            .Select(filePath => (
+                ArchivePath: Path.GetRelativePath(sourceDirectory, filePath).Replace(Path.DirectorySeparatorChar, '/'),
+                LocalPath: filePath))
+            .ToList();
 
-        foreach (var filePath in allFiles)
-        {
-            var relativePath = Path.GetRelativePath(sourceDirectory, filePath)
-                .Replace(Path.DirectorySeparatorChar, '/');
-
-            if (manifest is not null && relativePath.Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase))
-                continue;
-
-            archivePaths.Add(relativePath);
-        }
-
-        EnsureCreatableEntryPoint(archivePaths, manifest);
-
-        CreateAtomic(outputPath, archive =>
-        {
-            foreach (var filePath in allFiles)
-            {
-                var relativePath = Path.GetRelativePath(sourceDirectory, filePath)
-                    .Replace(Path.DirectorySeparatorChar, '/');
-
-                // Skip existing manifest.json if we are writing our own
-                if (manifest is not null && relativePath.Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                var error = PathValidator.Validate(relativePath);
-                if (error is not null)
-                    throw new InvalidOperationException($"Invalid path in source: {error}");
-
-                var entry = archive.CreateEntry(relativePath, CompressionLevel.Optimal);
-                using var entryStream = entry.Open();
-
-                // Normalise text file line endings to LF
-                if (IsTextFile(relativePath))
-                {
-                    var content = File.ReadAllText(filePath, Encoding.UTF8);
-                    content = NormaliseLf(content);
-                    var bytes = Encoding.UTF8.GetBytes(content);
-                    entryStream.Write(bytes, 0, bytes.Length);
-                }
-                else
-                {
-                    using var fileStream = File.OpenRead(filePath);
-                    fileStream.CopyTo(entryStream);
-                }
-            }
-
-            // Write manifest last (if provided)
-            if (manifest is not null)
-            {
-                manifest.Spec ??= new ManifestSpec();
-                manifest.Spec.Name ??= SpecName;
-                manifest.Spec.Version ??= ProducedSpecVersion;
-                manifest.Created ??= DateTime.UtcNow.ToString("o");
-                manifest.Modified = DateTime.UtcNow.ToString("o");
-
-                var manifestEntry = archive.CreateEntry(ManifestFileName, CompressionLevel.Optimal);
-                using var ms = manifestEntry.Open();
-                var json = JsonSerializer.Serialize(manifest, new JsonSerializerOptions
-                {
-                    WriteIndented = true,
-                    DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
-                });
-                json = NormaliseLf(json);
-                var bytes = Encoding.UTF8.GetBytes(json);
-                ms.Write(bytes, 0, bytes.Length);
-            }
-        });
+        var title = Path.GetFileName(Path.TrimEndingDirectorySeparator(Path.GetFullPath(sourceDirectory)));
+        CreateArchive(outputPath, files, manifest, title);
     }
 
     /// <summary>
-    /// Creates a .mdz archive from an explicit list of (archivePath, localPath) pairs.
+    /// Creates a .mdz archive from an explicit list of (archivePath, localPath) pairs. A conforming
+    /// producer always writes manifest.json (§14.1): <paramref name="manifest"/>, else a
+    /// manifest.json in <paramref name="files"/>, else a minimal one.
     /// </summary>
     public static void CreateFromFiles(
         string outputPath,
         IEnumerable<(string ArchivePath, string LocalPath)> files,
-        Manifest? manifest = null)
+        Manifest? manifest = null) =>
+        CreateArchive(outputPath, files, manifest, title: null);
+
+    private static void CreateArchive(
+        string outputPath,
+        IEnumerable<(string ArchivePath, string LocalPath)> files,
+        Manifest? manifest,
+        string? title)
     {
-        var fileList = files.ToList();
-        var archivePaths = fileList
-            .Select(f => f.ArchivePath.Replace(Path.DirectorySeparatorChar, '/'))
-            .Where(path => !(manifest is not null && path.Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase)))
+        // Producers write NFC paths (§5.4).
+        var fileList = files
+            .Select(f => (ArchivePath: MdzSpec.Nfc(f.ArchivePath.Replace(Path.DirectorySeparatorChar, '/').Replace('\\', '/')), f.LocalPath))
             .ToList();
 
-        EnsureCreatableEntryPoint(archivePaths, manifest);
+        JsonObject manifestNode;
+        var provided = fileList.FindIndex(f => f.ArchivePath == ManifestFileName);
+        if (manifest is not null)
+        {
+            manifestNode = ManifestToNode(manifest);
+        }
+        else if (provided >= 0)
+        {
+            manifestNode = MdzSpec.ParseManifest(File.ReadAllText(fileList[provided].LocalPath, Encoding.UTF8)).Manifest;
+        }
+        else
+        {
+            manifestNode = ManifestToNode(CreateManifest(new ManifestEditableMetadata { Title = string.IsNullOrWhiteSpace(title) ? null : title }));
+        }
+        fileList.RemoveAll(f => f.ArchivePath == ManifestFileName);
+
+        foreach (var (archivePath, _) in fileList)
+        {
+            var error = PathValidator.Validate(archivePath);
+            if (error is not null)
+                throw new InvalidOperationException($"Invalid path '{archivePath}': {error}");
+        }
+
+        var duplicate = MdzSpec.EntrySetProblem(fileList.Select(f => f.ArchivePath));
+        if (duplicate is not null)
+            throw duplicate.ToException();
+
+        CompleteProducerManifest(manifestNode, fileList.Select(f => f.ArchivePath).ToList());
 
         CreateAtomic(outputPath, archive =>
         {
             foreach (var (archivePath, localPath) in fileList)
-            {
-                var normalised = archivePath.Replace(Path.DirectorySeparatorChar, '/');
+                WriteFileEntry(archive, archivePath, localPath);
 
-                if (manifest is not null && normalised.Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                var error = PathValidator.Validate(normalised);
-                if (error is not null)
-                    throw new InvalidOperationException($"Invalid path '{normalised}': {error}");
-
-                var entry = archive.CreateEntry(normalised, CompressionLevel.Optimal);
-                using var entryStream = entry.Open();
-
-                if (IsTextFile(normalised))
-                {
-                    var content = File.ReadAllText(localPath, Encoding.UTF8);
-                    content = NormaliseLf(content);
-                    var bytes = Encoding.UTF8.GetBytes(content);
-                    entryStream.Write(bytes, 0, bytes.Length);
-                }
-                else
-                {
-                    using var fileStream = File.OpenRead(localPath);
-                    fileStream.CopyTo(entryStream);
-                }
-            }
-
-            if (manifest is not null)
-            {
-                manifest.Spec ??= new ManifestSpec();
-                manifest.Spec.Name ??= SpecName;
-                manifest.Spec.Version ??= ProducedSpecVersion;
-                manifest.Created ??= DateTime.UtcNow.ToString("o");
-                manifest.Modified = DateTime.UtcNow.ToString("o");
-
-                var manifestEntry = archive.CreateEntry(ManifestFileName, CompressionLevel.Optimal);
-                using var ms = manifestEntry.Open();
-                var json = JsonSerializer.Serialize(manifest, new JsonSerializerOptions
-                {
-                    WriteIndented = true,
-                    DefaultIgnoreCondition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull,
-                });
-                json = NormaliseLf(json);
-                var bytes = Encoding.UTF8.GetBytes(json);
-                ms.Write(bytes, 0, bytes.Length);
-            }
+            WriteManifestEntry(archive, SerializeManifestNode(manifestNode));
         });
+
+        if (manifest is not null)
+            CopyManifestValues(manifestNode, manifest);
     }
 
     /// <summary>
-    /// Builds a .mdz archive from local files with packaging options and warnings.
+    /// Builds a .mdz archive from local files with packaging options and warnings. The archive always
+    /// gets manifest.json (§14.1): generated from the options, the caller's own manifest.json, or a
+    /// minimal one; <c>entryPoint</c> and <c>mode</c> are filled in when missing.
     /// </summary>
     public static MdzPackBuildResult BuildArchive(
         string outputPath,
@@ -258,13 +182,15 @@ public static class MdzArchive
         if (cleanInput.Count == 0)
             throw new InvalidOperationException("ERR_PACK_NO_INPUT: No files found to package.");
 
-        var manifest = BuildManifestFromOptions(rootName, options);
+        var generated = BuildManifestFromOptions(rootName, options);
         var skipMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        // Case-folded so two names that differ only in case (§5.4 SHOULD NOT) get distinct paths.
         var usedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var selected = new List<MdzSelectedFile>();
         var manifestFiles = new List<ManifestFile>();
         var invalidPathCount = 0;
         var sanitizedPathCount = 0;
+        MdzSelectedFile? providedManifest = null;
 
         void AddSkip(string reason) =>
             skipMap[reason] = skipMap.TryGetValue(reason, out var count) ? count + 1 : 1;
@@ -272,7 +198,8 @@ public static class MdzArchive
         foreach (var item in cleanInput)
         {
             var originalPath = item.ArchivePath;
-            var archivePath = originalPath;
+            // Producers write NFC paths (§5.4).
+            var archivePath = MdzSpec.Nfc(originalPath);
 
             if (!MatchesAnyFilter(originalPath, options.Filters))
             {
@@ -280,9 +207,12 @@ public static class MdzArchive
                 continue;
             }
 
-            if (manifest is not null && archivePath.Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase))
+            if (archivePath == ManifestFileName)
             {
-                AddSkip("manifest.json replaced by generated manifest");
+                if (generated is not null)
+                    AddSkip("manifest.json replaced by generated manifest");
+                else
+                    providedManifest = new MdzSelectedFile(archivePath, originalPath, item.LocalPath);
                 continue;
             }
 
@@ -306,7 +236,7 @@ public static class MdzArchive
 
             selected.Add(new MdzSelectedFile(archivePath, originalPath, item.LocalPath));
 
-            if (options.MapFiles && manifest is not null && IsMarkdownPath(archivePath))
+            if (options.MapFiles && generated is not null && IsMarkdownPath(archivePath))
             {
                 var title = Path.GetFileNameWithoutExtension(originalPath)
                     .Replace('_', ' ')
@@ -321,67 +251,93 @@ public static class MdzArchive
             }
         }
 
-        if (manifest is null)
-            manifest = ReadProvidedManifest(selected);
+        JsonObject manifestNode;
+        if (generated is not null)
+        {
+            manifestNode = ManifestToNode(generated);
+        }
+        else if (providedManifest is not null)
+        {
+            manifestNode = ReadProvidedManifest(providedManifest.LocalPath);
+            selected.Add(providedManifest);
+        }
+        else
+        {
+            manifestNode = ManifestToNode(CreateManifest(new ManifestEditableMetadata
+            {
+                Title = string.IsNullOrWhiteSpace(options.Title) ? rootName : options.Title,
+            }));
+        }
 
-        var archivePaths = selected.Select(file => file.ArchivePath).ToList();
-        var resolvedEntryPoint = ResolveEntryPoint(archivePaths, manifest);
+        var archivePaths = selected.Where(f => f.ArchivePath != ManifestFileName).Select(file => file.ArchivePath).ToList();
+        var resolvedEntryPoint = MdzSpec.TryResolveEntryPoint(archivePaths, manifestNode);
         var warningMessages = new List<string>();
         var markdownPaths = archivePaths.Where(IsMarkdownPath).ToList();
 
-        if (manifest?.Mode is null && markdownPaths.Count > 1)
+        if (!manifestNode.ContainsKey("mode") && markdownPaths.Count > 1)
         {
             warningMessages.Add(
                 "Archive contains multiple Markdown files and no explicit manifest.mode; consumers will default to document mode. If these files are intended as separate documents, set mode: \"project\".");
         }
 
+        var declaredEntryPoint = manifestNode["entryPoint"] is JsonValue declared && declared.TryGetValue<string>(out var declaredText)
+            ? declaredText
+            : null;
+
         if (options.CreateIndex && resolvedEntryPoint is null)
         {
-            if (!string.IsNullOrWhiteSpace(manifest?.EntryPoint))
-                throw new InvalidOperationException($"ERR_PACK_ENTRYPOINT_MISSING: Manifest entry-point \"{manifest.EntryPoint}\" does not exist.");
+            if (!string.IsNullOrWhiteSpace(declaredEntryPoint))
+                throw new InvalidOperationException($"ERR_PACK_ENTRYPOINT_MISSING: Manifest entry-point \"{declaredEntryPoint}\" does not exist.");
 
             var generatedIndex = BuildGeneratedIndex(markdownPaths, options.Title ?? rootName);
             var generatedPath = MakeUniqueArchivePath("index.md", usedPaths);
             var generatedLocalPath = Path.Combine(Path.GetTempPath(), $"mdzip-core-index-{Guid.NewGuid():N}.md");
             File.WriteAllText(generatedLocalPath, generatedIndex, Encoding.UTF8);
             selected.Add(new MdzSelectedFile(generatedPath, "[generated]", generatedLocalPath));
-            archivePaths = selected.Select(file => file.ArchivePath).ToList();
+            archivePaths.Add(generatedPath);
             resolvedEntryPoint = generatedPath;
-            if (manifest is not null)
-                manifest.EntryPoint = generatedPath;
+            manifestNode["entryPoint"] = generatedPath;
         }
-
-        if (!string.IsNullOrWhiteSpace(manifest?.EntryPoint)
-            && !archivePaths.Any(path => path.Equals(manifest.EntryPoint, StringComparison.OrdinalIgnoreCase)))
+        else if (!string.IsNullOrWhiteSpace(declaredEntryPoint)
+            && MdzSpec.FindPath(archivePaths, declaredEntryPoint.StartsWith("./", StringComparison.Ordinal) ? declaredEntryPoint[2..] : declaredEntryPoint) is null)
         {
-            throw new InvalidOperationException($"ERR_PACK_ENTRYPOINT_MISSING: Manifest entry-point \"{manifest.EntryPoint}\" does not exist in archive.");
+            throw new InvalidOperationException($"ERR_PACK_ENTRYPOINT_MISSING: Manifest entry-point \"{declaredEntryPoint}\" does not exist in archive.");
         }
 
-        if (options.MapFiles && manifest is not null)
-            manifest.Files = manifestFiles;
+        // entryPoint is required in a producer's manifest (§6.2, §14.1): record the one that resolved.
+        if (!manifestNode.ContainsKey("entryPoint") && resolvedEntryPoint is not null)
+            manifestNode["entryPoint"] = resolvedEntryPoint;
+        if (!manifestNode.ContainsKey("mode"))
+            manifestNode["mode"] = "document";
+        if (manifestNode["spec"] is not JsonObject spec)
+            manifestNode["spec"] = spec = new JsonObject();
+        spec["name"] ??= MdzSpec.SpecName;
+        spec["version"] ??= MdzSpec.SpecVersion;
+
+        if (options.MapFiles && generated is not null)
+            manifestNode["files"] = JsonSerializer.SerializeToNode(manifestFiles, WriteJsonOptions);
 
         try
         {
             CreateAtomic(outputPath, archive =>
             {
-                foreach (var item in selected)
+                foreach (var item in selected.Where(f => f.ArchivePath != ManifestFileName))
                     WriteFileEntry(archive, item.ArchivePath, item.LocalPath);
 
-                if (manifest is not null)
-                    WriteManifestEntry(archive, SerializeManifest(manifest));
+                WriteManifestEntry(archive, SerializeManifestNode(manifestNode));
             });
         }
         finally
         {
-            foreach (var generated in selected.Where(file => file.OriginalPath == "[generated]"))
+            foreach (var generatedFile in selected.Where(file => file.OriginalPath == "[generated]"))
             {
-                if (File.Exists(generated.LocalPath))
-                    File.Delete(generated.LocalPath);
+                if (File.Exists(generatedFile.LocalPath))
+                    File.Delete(generatedFile.LocalPath);
             }
         }
 
         return new MdzPackBuildResult(
-            manifest,
+            NodeToManifest(manifestNode),
             resolvedEntryPoint,
             archivePaths,
             selected,
@@ -398,130 +354,23 @@ public static class MdzArchive
     // -------------------------------------------------------------------------
 
     /// <summary>
-    /// Adds a file to an existing .mdz archive or replaces an existing entry at the same archive path.
+    /// Adds a file to an existing .mdz archive or replaces an existing entry at the same archive path
+    /// (matched case-sensitively after NFC, §5.4.1). See <see cref="UpdateFiles"/>.
     /// </summary>
     public static void AddFile(string archivePath, string archiveEntryPath, string localFilePath)
     {
-        if (!File.Exists(archivePath))
-            throw new FileNotFoundException($"Archive '{archivePath}' does not exist.", archivePath);
-
         if (!File.Exists(localFilePath))
             throw new FileNotFoundException($"Source file '{localFilePath}' does not exist.", localFilePath);
 
-        var normalisedPath = archiveEntryPath.Replace(Path.DirectorySeparatorChar, '/');
-        var pathError = PathValidator.Validate(normalisedPath);
-        if (pathError is not null)
-            throw new InvalidOperationException($"Invalid path '{normalisedPath}': {pathError}");
-
-        CreateAtomic(archivePath, destinationArchive =>
-        {
-            using var sourceArchive = ZipFile.OpenRead(archivePath);
-            var existingPaths = sourceArchive.Entries
-                .Where(e => !string.IsNullOrEmpty(e.Name))
-                .Select(e => e.FullName.Replace('\\', '/'))
-                .Where(p => !p.Equals(normalisedPath, StringComparison.OrdinalIgnoreCase))
-                .ToList();
-            existingPaths.Add(normalisedPath);
-
-            var manifest = ReadManifestFromArchive(
-                sourceArchive,
-                normalisedPath,
-                localFilePath,
-                requireValidReplacementManifest: true,
-                requireValidExistingManifest: true);
-            EnsureCreatableEntryPoint(existingPaths, manifest);
-            var refreshedManifestJson = normalisedPath.Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase)
-                ? null
-                : TryRefreshManifestModifiedJson(sourceArchive);
-
-            foreach (var sourceEntry in sourceArchive.Entries.Where(e => !string.IsNullOrEmpty(e.Name)))
-            {
-                var sourcePath = sourceEntry.FullName.Replace('\\', '/');
-                if (sourcePath.Equals(normalisedPath, StringComparison.OrdinalIgnoreCase))
-                    continue;
-                if (refreshedManifestJson is not null
-                    && sourcePath.Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                CopyEntry(sourceEntry, destinationArchive);
-            }
-
-            if (normalisedPath.Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase))
-            {
-                if (manifest is null)
-                    throw new InvalidOperationException("Replacement manifest.json is invalid: expected a JSON object.");
-
-                // Use raw JSON so that created.by / modified.by subobjects are preserved.
-                var rawJson = File.ReadAllText(localFilePath, Encoding.UTF8);
-                WriteManifestEntry(destinationArchive, PrepareReplacementManifestJson(rawJson));
-            }
-            else
-            {
-                WriteFileEntry(destinationArchive, normalisedPath, localFilePath);
-                if (refreshedManifestJson is not null)
-                    WriteManifestEntry(destinationArchive, refreshedManifestJson);
-            }
-        });
+        UpdateFiles(archivePath, [new ArchiveWriteSpec(archiveEntryPath, localFilePath)]);
     }
 
     /// <summary>
-    /// Removes a file from an existing .mdz archive.
+    /// Removes a file from an existing .mdz archive (matched case-sensitively after NFC, §5.4.1).
+    /// See <see cref="UpdateFiles"/>.
     /// </summary>
-    public static void RemoveFile(string archivePath, string archiveEntryPath)
-    {
-        if (!File.Exists(archivePath))
-            throw new FileNotFoundException($"Archive '{archivePath}' does not exist.", archivePath);
-
-        var normalisedPath = archiveEntryPath.Replace(Path.DirectorySeparatorChar, '/');
-        var pathError = PathValidator.Validate(normalisedPath);
-        if (pathError is not null)
-            throw new InvalidOperationException($"Invalid path '{normalisedPath}': {pathError}");
-
-        CreateAtomic(archivePath, destinationArchive =>
-        {
-            using var sourceArchive = ZipFile.OpenRead(archivePath);
-
-            var sourceEntries = sourceArchive.Entries
-                .Where(e => !string.IsNullOrEmpty(e.Name))
-                .ToList();
-
-            var entryToRemove = sourceEntries.FirstOrDefault(e =>
-                e.FullName.Replace('\\', '/').Equals(normalisedPath, StringComparison.OrdinalIgnoreCase));
-            if (entryToRemove is null)
-                throw new FileNotFoundException($"Entry '{normalisedPath}' was not found in archive.", normalisedPath);
-
-            var remainingPaths = sourceEntries
-                .Select(e => e.FullName.Replace('\\', '/'))
-                .Where(p => !p.Equals(normalisedPath, StringComparison.OrdinalIgnoreCase))
-                .ToList();
-
-            var manifest = ReadManifestFromArchive(
-                sourceArchive,
-                normalisedPath,
-                localManifestPath: null,
-                requireValidReplacementManifest: false,
-                requireValidExistingManifest: true);
-            EnsureCreatableEntryPoint(remainingPaths, manifest);
-            var refreshedManifestJson = normalisedPath.Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase)
-                ? null
-                : TryRefreshManifestModifiedJson(sourceArchive);
-
-            foreach (var sourceEntry in sourceEntries)
-            {
-                var sourcePath = sourceEntry.FullName.Replace('\\', '/');
-                if (sourcePath.Equals(normalisedPath, StringComparison.OrdinalIgnoreCase))
-                    continue;
-                if (refreshedManifestJson is not null
-                    && sourcePath.Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                CopyEntry(sourceEntry, destinationArchive);
-            }
-
-            if (refreshedManifestJson is not null)
-                WriteManifestEntry(destinationArchive, refreshedManifestJson);
-        });
-    }
+    public static void RemoveFile(string archivePath, string archiveEntryPath) =>
+        UpdateFiles(archivePath, writes: [], removals: [archiveEntryPath]);
 
     /// <summary>
     /// Removes multiple files from an existing .mdz archive in one atomic rewrite.
@@ -532,24 +381,39 @@ public static class MdzArchive
         UpdateFiles(archivePath, writes: [], removals: archiveEntryPaths);
 
     /// <summary>
-    /// Applies multiple archive entry writes and removals in one atomic rewrite.
+    /// Applies multiple archive entry writes and removals in one atomic rewrite (§14.1).
     /// </summary>
+    /// <remarks>
+    /// <list type="bullet">
+    /// <item>Paths match case-sensitively after NFC (§5.4.1); written paths are stored in NFC.</item>
+    /// <item>Untouched entries keep their bytes, timestamps and attributes. Symbolic link entries are
+    /// kept unless <paramref name="dropSpecialFiles"/> is true or they are named in
+    /// <paramref name="removals"/> (§4, §14.1).</item>
+    /// <item>The existing manifest is kept as read — unknown fields and descriptive values this library
+    /// would ignore survive (§6.3) — and its <c>modified</c> refreshed. An archive without a manifest
+    /// gets one recording its entry point.</item>
+    /// <item>Throws <c>ERR_ENTRYPOINT_CHANGED</c> if the change would move the entry point, unless
+    /// <paramref name="manifest"/> or a written manifest.json sets it explicitly.</item>
+    /// </list>
+    /// </remarks>
     public static ArchiveMutationResult UpdateFiles(
         string archivePath,
         IEnumerable<ArchiveWriteSpec> writes,
         IEnumerable<string>? removals = null,
-        Manifest? manifest = null)
+        Manifest? manifest = null,
+        bool dropSpecialFiles = false)
     {
         if (!File.Exists(archivePath))
             throw new FileNotFoundException($"Archive '{archivePath}' does not exist.", archivePath);
 
-        var normalizedWrites = new Dictionary<string, ArchiveWriteSpec>(StringComparer.OrdinalIgnoreCase);
+        var normalizedWrites = new Dictionary<string, ArchiveWriteSpec>(StringComparer.Ordinal);
         foreach (var write in writes)
         {
-            var normalisedPath = NormaliseArchivePath(write.ArchivePath);
+            // Producers write NFC paths (§5.4).
+            var normalisedPath = MdzSpec.Nfc(NormaliseArchivePath(write.ArchivePath));
             var pathError = PathValidator.Validate(normalisedPath);
             if (pathError is not null)
-                throw new InvalidOperationException($"Invalid path '{normalisedPath}': {pathError}");
+                throw new InvalidOperationException($"ERR_PATH_INVALID: Invalid path '{normalisedPath}': {pathError}");
 
             if (!File.Exists(write.LocalPath))
                 throw new FileNotFoundException($"Source file '{write.LocalPath}' does not exist.", write.LocalPath);
@@ -557,61 +421,108 @@ public static class MdzArchive
             normalizedWrites[normalisedPath] = new ArchiveWriteSpec(normalisedPath, write.LocalPath);
         }
 
-        var normalizedRemovals = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var removalRequests = new List<string>();
         foreach (var removal in removals ?? [])
         {
             var normalisedPath = NormaliseArchivePath(removal);
             var pathError = PathValidator.Validate(normalisedPath);
             if (pathError is not null)
-                throw new InvalidOperationException($"Invalid path '{normalisedPath}': {pathError}");
-
-            normalizedRemovals[normalisedPath] = normalisedPath;
-            normalizedWrites.Remove(normalisedPath);
+                throw new InvalidOperationException($"ERR_PATH_INVALID: Invalid path '{normalisedPath}': {pathError}");
+            removalRequests.Add(normalisedPath);
         }
 
         ArchiveMutationResult? result = null;
         CreateAtomic(archivePath, destinationArchive =>
         {
-            using var sourceArchive = ZipFile.OpenRead(archivePath);
-            var sourceEntries = sourceArchive.Entries
-                .Where(e => !string.IsNullOrEmpty(e.Name))
-                .ToList();
-            var existingPaths = sourceEntries
-                .Select(e => e.FullName.Replace('\\', '/'))
-                .ToList();
+            using var sourceArchive = OpenChecked(archivePath);
+            var fileEntries = FileEntries(sourceArchive).ToList();
+            var specialEntries = sourceArchive.Entries.Where(IsSymlink).ToList();
+            var existingPaths = fileEntries.Select(EntryPath).Where(p => p != ManifestFileName).ToList();
 
-            foreach (var removal in normalizedRemovals.Values)
+            // Removals: NFC key → stored name, which must exist (symbolic links included).
+            var normalizedRemovals = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var removal in removalRequests)
             {
-                if (!existingPaths.Any(path => path.Equals(removal, StringComparison.OrdinalIgnoreCase)))
-                    throw new FileNotFoundException($"Entry '{removal}' was not found in archive.", removal);
+                var stored = MdzSpec.FindPath(fileEntries.Concat(specialEntries).Select(EntryPath), removal)
+                    ?? throw new FileNotFoundException($"ERR_NOT_FOUND: Entry '{removal}' was not found in archive.", removal);
+                normalizedRemovals[MdzSpec.Nfc(stored)] = stored;
+            }
+            if (dropSpecialFiles)
+            {
+                foreach (var special in specialEntries)
+                    normalizedRemovals[MdzSpec.Nfc(EntryPath(special))] = EntryPath(special);
+            }
+            foreach (var key in normalizedRemovals.Keys)
+                normalizedWrites.Remove(key);
+
+            var changing = normalizedWrites.Count > 0 || normalizedRemovals.Count > 0;
+            // An unreadable existing manifest blocks a save that would keep it, not one that replaces or removes it.
+            var keepsManifest = !normalizedRemovals.ContainsKey(ManifestFileName) && !normalizedWrites.ContainsKey(ManifestFileName);
+            JsonObject? existingManifest;
+            try
+            {
+                existingManifest = ReadManifestNode(sourceArchive, requireValid: keepsManifest && (changing || manifest is not null));
+            }
+            catch (InvalidOperationException ex)
+            {
+                throw MdzSpec.Error("ERR_MANIFEST_INVALID", $"Existing manifest.json is invalid: {ex.Message}");
+            }
+            var entryPointBefore = MdzSpec.TryResolveEntryPoint(existingPaths, existingManifest);
+
+            // The manifest to write: an explicit manifest.json write > the manifest argument > the
+            // existing one refreshed > a new one for an archive that has none (§14.1).
+            JsonObject? manifestNode = null;
+            var explicitManifest = false;
+            if (normalizedWrites.TryGetValue(ManifestFileName, out var manifestWrite))
+            {
+                explicitManifest = true;
+                manifestNode = MdzSpec.ParseManifest(File.ReadAllText(manifestWrite.LocalPath, Encoding.UTF8)).Manifest;
+                StampManifestNode(manifestNode, setCreatedIfMissing: true);
+                EnsureWritableManifest(manifestNode);
+            }
+            else if (manifest is not null)
+            {
+                explicitManifest = true;
+                manifestNode = ManifestToNode(UpdateManifest(manifest));
+                EnsureWritableManifest(manifestNode);
+            }
+            else if (changing && !normalizedRemovals.ContainsKey(ManifestFileName))
+            {
+                if (existingManifest is not null)
+                {
+                    // Kept as read, so unknown fields — and descriptive values this library would
+                    // ignore — survive the save (§6.3); only critical fields must be valid.
+                    manifestNode = existingManifest;
+                    StampManifestNode(manifestNode, setCreatedIfMissing: false);
+                    MdzSpec.CheckManifest(manifestNode);
+                }
+                else
+                {
+                    manifestNode = ManifestToNode(CreateManifest());
+                    if (entryPointBefore is not null && !normalizedRemovals.ContainsKey(MdzSpec.Nfc(entryPointBefore)))
+                        manifestNode["entryPoint"] = entryPointBefore;
+                }
             }
 
-            var manifestJson = ResolveMutationManifestJson(
-                sourceArchive,
-                normalizedWrites,
-                normalizedRemovals,
-                manifest);
-
-            var manifestForValidation = ResolveMutationManifestForValidation(
-                sourceArchive,
-                manifestJson,
-                normalizedRemovals);
             var nextPaths = existingPaths
-                .Where(path => !normalizedRemovals.ContainsKey(path)
-                    && !normalizedWrites.ContainsKey(path)
-                    && !path.Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase))
-                .Concat(normalizedWrites.Values
-                    .Select(write => write.ArchivePath)
-                    .Where(path => !path.Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase)))
+                .Where(path => !normalizedRemovals.ContainsKey(MdzSpec.Nfc(path)) && !normalizedWrites.ContainsKey(MdzSpec.Nfc(path)))
+                .Concat(normalizedWrites.Keys.Where(path => path != ManifestFileName))
                 .ToList();
-            EnsureCreatableEntryPoint(nextPaths, manifestForValidation);
-
-            foreach (var sourceEntry in sourceEntries)
+            var nextManifest = manifestNode ?? (normalizedRemovals.ContainsKey(ManifestFileName) ? null : existingManifest);
+            var entryPointAfter = MdzSpec.ResolveEntryPoint(nextPaths, nextManifest);
+            if (entryPointBefore is not null && !explicitManifest && !MdzSpec.SamePath(entryPointBefore, entryPointAfter))
             {
-                var sourcePath = sourceEntry.FullName.Replace('\\', '/');
-                if (normalizedRemovals.ContainsKey(sourcePath)
-                    || normalizedWrites.ContainsKey(sourcePath)
-                    || (manifestJson is not null && sourcePath.Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase)))
+                throw MdzSpec.Error(
+                    "ERR_ENTRYPOINT_CHANGED",
+                    $"this change would move the entry point from \"{entryPointBefore}\" to \"{entryPointAfter}\"; set manifest entryPoint to change it.");
+            }
+
+            foreach (var sourceEntry in fileEntries.Concat(specialEntries))
+            {
+                var key = MdzSpec.Nfc(EntryPath(sourceEntry));
+                if (normalizedRemovals.ContainsKey(key)
+                    || normalizedWrites.ContainsKey(key)
+                    || (manifestNode is not null && key == ManifestFileName))
                 {
                     continue;
                 }
@@ -619,24 +530,19 @@ public static class MdzArchive
                 CopyEntry(sourceEntry, destinationArchive);
             }
 
-            foreach (var write in normalizedWrites.Values)
-            {
-                if (write.ArchivePath.Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase))
-                    continue;
-
+            foreach (var write in normalizedWrites.Values.Where(write => write.ArchivePath != ManifestFileName))
                 WriteFileEntry(destinationArchive, write.ArchivePath, write.LocalPath);
-            }
 
-            if (manifestJson is not null)
-                WriteManifestEntry(destinationArchive, manifestJson);
+            if (manifestNode is not null)
+                WriteManifestEntry(destinationArchive, SerializeManifestNode(manifestNode));
 
             var archivePaths = nextPaths
-                .Concat(manifestJson is null ? [] : [ManifestFileName])
+                .Concat(nextManifest is null ? [] : [ManifestFileName])
                 .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
                 .ToList();
             result = new ArchiveMutationResult(
-                ReadManifestJson(manifestJson),
-                ResolveEntryPoint(archivePaths, manifestForValidation),
+                manifestNode is null ? null : NodeToManifest(manifestNode),
+                entryPointAfter,
                 archivePaths);
         });
 
@@ -648,20 +554,18 @@ public static class MdzArchive
     // -------------------------------------------------------------------------
 
     /// <summary>
-    /// Extracts a .mdz archive to a destination directory.
+    /// Extracts a .mdz archive to a destination directory. Symbolic link entries are skipped, never
+    /// created as links (§13.1); see <see cref="ListSpecialFiles"/>.
     /// </summary>
     public static void Extract(string archivePath, string destinationDirectory)
     {
-        using var archive = ZipFile.OpenRead(archivePath);
+        using var archive = OpenChecked(archivePath);
 
         Directory.CreateDirectory(destinationDirectory);
 
-        foreach (var entry in archive.Entries)
+        foreach (var entry in FileEntries(archive))
         {
-            if (string.IsNullOrEmpty(entry.Name))
-                continue; // directory entry
-
-            var entryPath = entry.FullName.Replace('\\', '/');
+            var entryPath = EntryPath(entry);
 
             var error = PathValidator.Validate(entryPath);
             if (error is not null)
@@ -691,45 +595,67 @@ public static class MdzArchive
     // -------------------------------------------------------------------------
 
     /// <summary>
-    /// Returns a list of all entry paths within the archive.
+    /// Returns a list of all file entry paths within the archive. Symbolic link entries are not
+    /// listed (§13.1); see <see cref="ListSpecialFiles"/>.
     /// </summary>
     public static IReadOnlyList<string> List(string archivePath)
     {
-        using var archive = ZipFile.OpenRead(archivePath);
-        return archive.Entries
-            .Where(e => !string.IsNullOrEmpty(e.Name))
-            .Select(e => e.FullName.Replace('\\', '/'))
+        using var archive = OpenChecked(archivePath);
+        return FileEntries(archive)
+            .Select(EntryPath)
             .OrderBy(p => p, StringComparer.OrdinalIgnoreCase)
             .ToList();
     }
 
     /// <summary>
-    /// Returns true when a file or directory entry exists in the archive.
+    /// Symbolic link entries (and other special files) in the archive. They are not listed, can't be
+    /// read and are never followed (§4, §13.1); <see cref="Validate"/> reports them. Mutations keep them
+    /// unless <c>dropSpecialFiles</c> is set.
+    /// </summary>
+    public static IReadOnlyList<string> ListSpecialFiles(string archivePath)
+    {
+        using var archive = OpenChecked(archivePath);
+        return archive.Entries.Where(IsSymlink).Select(EntryPath).ToList();
+    }
+
+    /// <summary>
+    /// Returns true when a file or directory entry exists in the archive (case-sensitive after NFC, §5.4.1).
     /// </summary>
     public static bool HasEntry(string archivePath, string archiveEntryPath)
     {
-        using var archive = ZipFile.OpenRead(archivePath);
+        using var archive = OpenChecked(archivePath);
         return FindEntryWithDirectoryFallback(archive, archiveEntryPath) is not null;
     }
 
     /// <summary>
-    /// Finds a file or directory entry by archive path using case-insensitive lookup.
+    /// Finds a file or directory entry by archive path: case-sensitive after NFC normalization (§5.4.1).
     /// </summary>
     public static ArchiveEntry? FindEntry(string archivePath, string archiveEntryPath)
     {
-        using var archive = ZipFile.OpenRead(archivePath);
+        using var archive = OpenChecked(archivePath);
         var entry = FindEntryWithDirectoryFallback(archive, archiveEntryPath);
         return entry is null ? null : ToArchiveEntry(entry);
     }
 
     /// <summary>
-    /// Returns detailed entry information for all files in the archive.
+    /// The stored path of an entry whose name differs from <paramref name="archiveEntryPath"/> only in
+    /// case, for reporting a failed lookup ("did you mean ...?", §5.4.1). Never use it to open the entry.
+    /// </summary>
+    public static string? FindCaseOnlyMatch(string archivePath, string archiveEntryPath)
+    {
+        var wanted = MdzSpec.Nfc(NormaliseArchivePath(archiveEntryPath));
+        return List(archivePath).FirstOrDefault(path =>
+            MdzSpec.Nfc(path).Equals(wanted, StringComparison.OrdinalIgnoreCase)
+            && !MdzSpec.SamePath(path, wanted));
+    }
+
+    /// <summary>
+    /// Returns detailed entry information for all file entries in the archive.
     /// </summary>
     public static IReadOnlyList<ArchiveEntry> ListDetailed(string archivePath)
     {
-        using var archive = ZipFile.OpenRead(archivePath);
-        return archive.Entries
-            .Where(e => !string.IsNullOrEmpty(e.Name))
+        using var archive = OpenChecked(archivePath);
+        return FileEntries(archive)
             .Select(ToArchiveEntry)
             .OrderBy(e => e.Path, StringComparer.OrdinalIgnoreCase)
             .ToList();
@@ -775,17 +701,25 @@ public static class MdzArchive
     // -------------------------------------------------------------------------
 
     /// <summary>
-    /// Reads the manifest.json from the archive, or returns null if not present.
+    /// Reads manifest.json from the archive, or returns null if not present (§6.4).
     /// </summary>
+    /// <remarks>
+    /// Throws <c>ERR_MANIFEST_INVALID</c> for an unreadable manifest and the matching error for an
+    /// invalid critical field (<c>spec</c>, <c>spec.version</c>, <c>mode</c>, <c>entryPoint</c>).
+    /// Descriptive fields with a wrong type or value are ignored — left out of the result and reported
+    /// by <see cref="Validate"/>. Unknown top-level fields are kept in
+    /// <see cref="Manifest.AdditionalFields"/>.
+    /// </remarks>
     public static Manifest? ReadManifest(string archivePath)
     {
-        using var archive = ZipFile.OpenRead(archivePath);
-        var manifestEntry = FindEntry(archive, ManifestFileName);
-        if (manifestEntry is null)
+        using var archive = OpenChecked(archivePath);
+        var node = ReadManifestNode(archive, requireValid: true);
+        if (node is null)
             return null;
 
-        using var stream = manifestEntry.Open();
-        return JsonSerializer.Deserialize<Manifest>(stream, JsonOptions);
+        foreach (var field in MdzSpec.CheckManifest(node))
+            node.Remove(field);
+        return NodeToManifest(node);
     }
 
     /// <summary>
@@ -819,6 +753,8 @@ public static class MdzArchive
 
     /// <summary>
     /// Updates manifest.json in an archive atomically and returns the manifest that was written.
+    /// The existing manifest is edited as JSON, so every field it has — nested unknown fields
+    /// included — survives (§6.3). An archive without a manifest gets one.
     /// </summary>
     public static Manifest UpdateManifest(
         string archivePath,
@@ -828,37 +764,31 @@ public static class MdzArchive
         if (!File.Exists(archivePath))
             throw new FileNotFoundException($"Archive '{archivePath}' does not exist.", archivePath);
 
+        options ??= new ManifestUpdateOptions();
         Manifest? updatedManifest = null;
         CreateAtomic(archivePath, destinationArchive =>
         {
-            using var sourceArchive = ZipFile.OpenRead(archivePath);
-            var sourceEntries = sourceArchive.Entries
-                .Where(e => !string.IsNullOrEmpty(e.Name))
-                .ToList();
-            var currentManifest = ReadManifestFromArchive(
-                sourceArchive,
-                replacedOrRemovedPath: string.Empty,
-                localManifestPath: null,
-                requireValidReplacementManifest: false,
-                requireValidExistingManifest: true);
+            using var sourceArchive = OpenChecked(archivePath);
+            var archivePaths = FileEntries(sourceArchive).Select(EntryPath).Where(p => p != ManifestFileName).ToList();
+            var existing = ReadManifestNode(sourceArchive, requireValid: true);
+            var entryPointBefore = MdzSpec.TryResolveEntryPoint(archivePaths, existing);
 
-            updatedManifest = UpdateManifest(currentManifest, metadata, options);
-            var archivePaths = sourceEntries
-                .Select(entry => entry.FullName.Replace('\\', '/'))
-                .Where(path => !path.Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase))
-                .ToList();
-            EnsureCreatableEntryPoint(archivePaths, updatedManifest);
+            var node = existing ?? ManifestToNode(CreateManifest());
+            if (existing is null && entryPointBefore is not null)
+                node["entryPoint"] = entryPointBefore;
+            ApplyManifestMetadata(node, metadata);
+            StampManifestNode(node, options.SetCreatedIfMissing, options.RefreshModified);
+            MdzSpec.CheckManifest(node);
+            MdzSpec.ResolveEntryPoint(archivePaths, node);
 
-            foreach (var sourceEntry in sourceEntries)
+            foreach (var sourceEntry in FileEntries(sourceArchive).Concat(sourceArchive.Entries.Where(IsSymlink)))
             {
-                var sourcePath = sourceEntry.FullName.Replace('\\', '/');
-                if (sourcePath.Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase))
-                    continue;
-
-                CopyEntry(sourceEntry, destinationArchive);
+                if (EntryPath(sourceEntry) != ManifestFileName)
+                    CopyEntry(sourceEntry, destinationArchive);
             }
 
-            WriteManifestEntry(destinationArchive, SerializeManifest(updatedManifest));
+            WriteManifestEntry(destinationArchive, SerializeManifestNode(node));
+            updatedManifest = NodeToManifest(node);
         });
 
         return updatedManifest!;
@@ -892,30 +822,34 @@ public static class MdzArchive
             });
 
     /// <summary>
-    /// Resolves the entry point Markdown file for the archive per Section 5.5.
-    /// Returns null if no unambiguous entry point can be determined.
+    /// Resolves the entry point Markdown file for the archive per Section 5.5. Returns null if there
+    /// is none, including when manifest.json is unreadable or its <c>entryPoint</c> is invalid or
+    /// missing (which never falls back to another file). <see cref="ResolveEntryPointStrict"/> says why.
     /// </summary>
     public static string? ResolveEntryPoint(string archivePath)
     {
-        using var archive = ZipFile.OpenRead(archivePath);
-
-        // Read manifest so its entryPoint override is honoured
-        Manifest? manifest = null;
-        var manifestEntry = FindEntry(archive, ManifestFileName);
-        if (manifestEntry is not null)
+        try
         {
-            try
-            {
-                using var stream = manifestEntry.Open();
-                manifest = JsonSerializer.Deserialize<Manifest>(stream, JsonOptions);
-            }
-            catch (JsonException)
-            {
-                // Ignore parse errors here; validation will catch them
-            }
+            return ResolveEntryPointStrict(archivePath);
         }
+        catch (InvalidOperationException)
+        {
+            return null;
+        }
+    }
 
-        return ResolveEntryPoint(archive, manifest);
+    /// <summary>
+    /// Resolves the entry point per §5.5, throwing <c>ERR_ENTRYPOINT_INVALID</c>,
+    /// <c>ERR_ENTRYPOINT_MISSING</c>, <c>ERR_ENTRYPOINT_UNRESOLVED</c> or a manifest error when there is
+    /// none. See <see cref="MdzSpec.ResolveEntryPoint"/>.
+    /// </summary>
+    public static string ResolveEntryPointStrict(string archivePath)
+    {
+        using var archive = OpenChecked(archivePath);
+        var manifest = ReadManifestNode(archive, requireValid: true);
+        if (manifest is not null)
+            MdzSpec.CheckManifest(manifest);
+        return MdzSpec.ResolveEntryPoint(FileEntries(archive).Select(EntryPath), manifest);
     }
 
     /// <summary>
@@ -928,11 +862,43 @@ public static class MdzArchive
     }
 
     /// <summary>
+    /// Resolves a Markdown link written in <paramref name="document"/> (§9.3–9.6). Without a
+    /// <paramref name="host"/>, only links inside this archive resolve; links that leave it are
+    /// <c>unresolved</c> with reason <c>no-host-location</c>.
+    /// </summary>
+    /// <param name="archivePath">The archive file.</param>
+    /// <param name="document">Archive path of the document containing the link.</param>
+    /// <param name="link">The link destination as written.</param>
+    /// <param name="host">Optional host model; this archive is then addressed as host path <paramref name="archiveHostPath"/>.</param>
+    /// <param name="archiveHostPath">This archive's host path (default <c>archive.mdz</c>).</param>
+    /// <param name="use"><c>navigate</c> or <c>embed</c>.</param>
+    public static MdzLinkTarget ResolveLink(
+        string archivePath,
+        string document,
+        string link,
+        IMdzLinkHost? host = null,
+        string archiveHostPath = "archive.mdz",
+        string use = "navigate") =>
+        MdzLinks.ResolveLink(
+            new MdzArchiveLinkSource(archiveHostPath, document),
+            link,
+            host ?? new SingleArchiveLinkHost(List(archivePath)),
+            use);
+
+    private sealed class SingleArchiveLinkHost(IReadOnlyList<string> paths) : IMdzLinkHost
+    {
+        public string? Kind(string path) => null;
+        public string? FindEntry(string archive, string entry) => MdzSpec.FindPath(paths, entry);
+        public string? EntryPoint(string archive) => null;
+        public bool HostLocation => false;
+    }
+
+    /// <summary>
     /// Reads UTF-8 text content from an archive entry.
     /// </summary>
     public static string ReadText(string archivePath, string archiveEntryPath)
     {
-        using var archive = ZipFile.OpenRead(archivePath);
+        using var archive = OpenChecked(archivePath);
         var entry = GetFileEntryOrThrow(archive, archiveEntryPath);
         using var stream = entry.Open();
         using var reader = new StreamReader(stream, Encoding.UTF8);
@@ -944,7 +910,7 @@ public static class MdzArchive
     /// </summary>
     public static byte[] ReadBytes(string archivePath, string archiveEntryPath)
     {
-        using var archive = ZipFile.OpenRead(archivePath);
+        using var archive = OpenChecked(archivePath);
         var entry = GetFileEntryOrThrow(archive, archiveEntryPath);
         using var stream = entry.Open();
         using var memory = new MemoryStream();
@@ -1026,14 +992,14 @@ public static class MdzArchive
             .Select(entry => entry.Path)
             .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
             .ToList();
-        var assetPathSet = assetPaths.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var assetPathSet = assetPaths.ToHashSet(MdzSpec.PathComparer);
 
         var scannedMarkdownPaths = options.ScanMode == "all-markdown"
             ? allEntries.Where(entry => entry.IsMarkdown).Select(entry => entry.Path).ToList()
             : [NormaliseArchivePath(options.EntryPoint ?? ResolveEntryPoint(archivePath) ?? string.Empty)];
         scannedMarkdownPaths = scannedMarkdownPaths.Where(path => !string.IsNullOrWhiteSpace(path)).ToList();
 
-        var referencedAssets = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var referencedAssets = new HashSet<string>(MdzSpec.PathComparer);
         var unresolvedReferences = new List<MdzOrphanedAssetReferenceIssue>();
 
         foreach (var markdownPath in scannedMarkdownPaths)
@@ -1078,7 +1044,7 @@ public static class MdzArchive
         var manifest = ReadManifest(archivePath);
         if (!string.IsNullOrWhiteSpace(manifest?.Cover))
         {
-            var cover = NormaliseArchivePath(manifest.Cover);
+            var cover = NormaliseArchivePath(manifest.Cover.StartsWith("./", StringComparison.Ordinal) ? manifest.Cover[2..] : manifest.Cover);
             if (assetPathSet.Contains(cover))
                 referencedAssets.Add(ResolvePathCase(assetPaths, cover));
         }
@@ -1118,13 +1084,13 @@ public static class MdzArchive
                 entry.Path,
                 GetDocumentTitle(entry.Path, manifest),
                 ReadText(archivePath, entry.Path),
-                entryPoint is not null && entry.Path.Equals(entryPoint, StringComparison.OrdinalIgnoreCase)))
+                entryPoint is not null && MdzSpec.SamePath(entry.Path, entryPoint)))
             .ToList();
 
         var assets = entries
             .Where(entry => !entry.IsMarkdown
                 && !entry.IsDirectory
-                && !entry.Path.Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase))
+                && entry.Path != ManifestFileName)
             .Select(entry =>
             {
                 var mimeType = InferMimeType(entry.Path);
@@ -1270,141 +1236,110 @@ public static class MdzArchive
     }
 
     /// <summary>
-    /// Validates raw manifest.json text without requiring an archive.
+    /// Validates raw manifest.json text without requiring an archive (§6.4). Errors: unreadable JSON,
+    /// a non-object, and invalid critical fields. Warnings: ignored descriptive fields, duplicate
+    /// members, and a missing or older-major <c>spec.version</c>.
     /// </summary>
     public static ValidationResult ValidateManifest(string manifestJson)
     {
+        JsonObject manifest;
+        IReadOnlyList<string> duplicates;
         try
         {
-            using var manifestDocument = JsonDocument.Parse(manifestJson, StrictJsonDocumentOptions);
-            var root = manifestDocument.RootElement.Clone();
-            if (root.ValueKind != JsonValueKind.Object)
-                return ValidateManifest(manifest: null, root);
-
-            var manifest = JsonSerializer.Deserialize<Manifest>(manifestJson, JsonOptions);
-            return ValidateManifest(manifest, root);
+            (manifest, duplicates) = MdzSpec.ParseManifest(manifestJson);
         }
-        catch (JsonException ex)
+        catch (InvalidOperationException ex)
+        {
+            return new ValidationResult { IsValid = false, Errors = [ex.Message], Warnings = [] };
+        }
+
+        var errors = new List<string>();
+        var warnings = new List<string>();
+        CheckManifestInto(manifest, duplicates, errors, warnings);
+        return new ValidationResult { IsValid = errors.Count == 0, Errors = errors, Warnings = warnings };
+    }
+
+    /// <summary>
+    /// Validates a manifest object without requiring an archive (see <see cref="ValidateManifest(string)"/>).
+    /// </summary>
+    public static ValidationResult ValidateManifest(Manifest? manifest)
+    {
+        if (manifest is null)
         {
             return new ValidationResult
             {
                 IsValid = false,
-                Errors = [$"ERR_MANIFEST_INVALID: manifest.json could not be parsed: {ex.Message}"],
+                Errors = ["ERR_MANIFEST_INVALID: manifest is null."],
                 Warnings = [],
             };
         }
-    }
 
-    /// <summary>
-    /// Validates a manifest object without requiring an archive.
-    /// </summary>
-    public static ValidationResult ValidateManifest(Manifest? manifest) =>
-        ValidateManifest(manifest, manifestRoot: null);
+        return ValidateManifest(SerializeManifest(manifest));
+    }
 
     /// <summary>
     /// Validates a .mdz archive against the specification.
     /// </summary>
+    /// <remarks>
+    /// Errors: an unreadable or encrypted ZIP, unsupported compression, duplicate or conflicting entry
+    /// names (§4, §5.4), invalid entry paths, an unreadable manifest or invalid critical field (§6.4), and
+    /// an entry point that can't be resolved (§5.5). Warnings: symbolic link entries, which are skipped
+    /// (§13.1); ignored descriptive manifest fields and duplicate members; a missing <c>cover</c>; and
+    /// missing version metadata.
+    /// </remarks>
     public static ValidationResult Validate(string archivePath)
     {
         var errors = new List<string>();
         var warnings = new List<string>();
 
+        ZipArchive archive;
         try
         {
-            if (IsArchiveEncrypted(archivePath))
-            {
-                errors.Add("ERR_ZIP_ENCRYPTED: Encrypted ZIP entries are not supported.");
-                return new ValidationResult { IsValid = false, Errors = errors, Warnings = warnings };
-            }
+            archive = OpenChecked(archivePath);
         }
-        catch (Exception ex) when (ex is InvalidDataException or IOException or EndOfStreamException)
+        catch (InvalidOperationException ex)
         {
-            errors.Add("ERR_ZIP_INVALID: The file is not a valid ZIP archive.");
-            return new ValidationResult { IsValid = false, Errors = errors, Warnings = warnings };
-        }
-
-        ZipArchive? archive = null;
-        try
-        {
-            archive = ZipFile.OpenRead(archivePath);
-        }
-        catch (InvalidDataException)
-        {
-            errors.Add("ERR_ZIP_INVALID: The file is not a valid ZIP archive.");
+            errors.Add(ex.Message);
             return new ValidationResult { IsValid = false, Errors = errors, Warnings = warnings };
         }
 
         using (archive)
         {
-            // Check for encrypted entries
-            foreach (var entry in archive.Entries)
+            foreach (var entry in FileEntries(archive))
             {
-                // Encryption is validated up front by reading central directory flags.
-                _ = entry;
+                var problem = MdzSpec.PathProblem(EntryPath(entry));
+                if (problem is not null)
+                    errors.Add($"ERR_PATH_INVALID: {problem.Message}");
             }
 
-            // Validate all entry paths
-            foreach (var entry in archive.Entries)
-            {
-                if (string.IsNullOrEmpty(entry.Name))
-                    continue;
+            foreach (var entry in archive.Entries.Where(IsSymlink))
+                warnings.Add($"ERR_PATH_INVALID: symbolic link '{EntryPath(entry)}' is ignored and never followed (§4, §13.1).");
 
-                var path = entry.FullName.Replace('\\', '/');
-                var pathError = PathValidator.Validate(path);
-                if (pathError is not null)
-                    errors.Add($"ERR_PATH_INVALID: {pathError}");
-            }
-
-            // Parse manifest if present
-            Manifest? manifest = null;
+            JsonObject? manifest = null;
             var manifestEntry = FindEntry(archive, ManifestFileName);
             if (manifestEntry is not null)
             {
-                JsonElement? manifestRoot = null;
+                IReadOnlyList<string> duplicates;
                 try
                 {
-                    using var stream = manifestEntry.Open();
-                    using var reader = new StreamReader(stream, Encoding.UTF8);
-                    var manifestText = reader.ReadToEnd();
-                    using var manifestJson = JsonDocument.Parse(manifestText, StrictJsonDocumentOptions);
-                    manifestRoot = manifestJson.RootElement.Clone();
-                    manifest = JsonSerializer.Deserialize<Manifest>(manifestText, JsonOptions);
+                    using var reader = new StreamReader(manifestEntry.Open(), Encoding.UTF8);
+                    (manifest, duplicates) = MdzSpec.ParseManifest(reader.ReadToEnd());
                 }
-                catch (JsonException ex)
+                catch (InvalidOperationException ex)
                 {
-                    errors.Add($"ERR_MANIFEST_INVALID: manifest.json could not be parsed: {ex.Message}");
-                    return new ValidationResult { IsValid = errors.Count == 0, Errors = errors, Warnings = warnings };
+                    errors.Add(ex.Message);
+                    return new ValidationResult { IsValid = false, Errors = errors, Warnings = warnings };
                 }
 
-                if (manifest is null)
-                {
-                    errors.AddRange(ValidateManifest(manifest, manifestRoot).Errors);
-                }
-                else
-                {
-                    var manifestValidation = ValidateManifest(manifest, manifestRoot);
-                    errors.AddRange(manifestValidation.Errors);
-                    warnings.AddRange(manifestValidation.Warnings);
+                if (!CheckManifestInto(manifest, duplicates, errors, warnings))
+                    return new ValidationResult { IsValid = false, Errors = errors, Warnings = warnings };
 
-                    // Validate entryPoint reference
-                    if (!string.IsNullOrWhiteSpace(manifest.EntryPoint))
-                    {
-                        if (!IsMarkdownPath(manifest.EntryPoint))
-                        {
-                            errors.Add("ERR_ENTRYPOINT_INVALID: manifest 'entryPoint' must reference a Markdown file.");
-                        }
-                        else if (FindEntry(archive, manifest.EntryPoint) is null)
-                        {
-                            errors.Add($"ERR_ENTRYPOINT_MISSING: manifest 'entryPoint' references '{manifest.EntryPoint}' which does not exist in the archive.");
-                        }
-                    }
-
-                    // Validate cover reference
-                    if (!string.IsNullOrWhiteSpace(manifest.Cover))
-                    {
-                        if (FindEntry(archive, manifest.Cover) is null)
-                            warnings.Add($"manifest 'cover' references '{manifest.Cover}' which does not exist in the archive.");
-                    }
+                if (manifest["cover"] is JsonValue cover && cover.TryGetValue<string>(out var coverPath)
+                    && MdzSpec.CoverProblem(cover) is null)
+                {
+                    var found = FindEntry(archive, coverPath.StartsWith("./", StringComparison.Ordinal) ? coverPath[2..] : coverPath);
+                    if (found is null || IsDirectoryEntry(found))
+                        warnings.Add($"manifest 'cover' references '{coverPath}' which does not exist in the archive.");
                 }
             }
             else
@@ -1412,11 +1347,25 @@ public static class MdzArchive
                 warnings.Add("No manifest.json present. Version metadata is unavailable.");
             }
 
-            // Validate entry point resolution
-            var entryPoint = ResolveEntryPoint(archive, manifest);
-            if (entryPoint is null)
+            try
             {
-                errors.Add("ERR_ENTRYPOINT_UNRESOLVED: No unambiguous primary Markdown file could be determined.");
+                MdzSpec.ResolveEntryPoint(FileEntries(archive).Select(EntryPath), manifest);
+            }
+            catch (InvalidOperationException ex)
+            {
+                var message = ex.Message;
+                // A lookup that fails only because of case gets a suggestion, never a silent match (§5.4.1).
+                if (MdzSpec.ErrorCode(ex) == "ERR_ENTRYPOINT_MISSING"
+                    && manifest?["entryPoint"] is JsonValue declared
+                    && declared.TryGetValue<string>(out var wanted))
+                {
+                    wanted = wanted.StartsWith("./", StringComparison.Ordinal) ? wanted[2..] : wanted;
+                    var near = FileEntries(archive).Select(EntryPath).FirstOrDefault(p =>
+                        MdzSpec.Nfc(p).Equals(MdzSpec.Nfc(wanted), StringComparison.OrdinalIgnoreCase));
+                    if (near is not null)
+                        message += $" (did you mean \"{near}\"? Paths are case-sensitive.)";
+                }
+                errors.Add(message);
             }
         }
 
@@ -1426,6 +1375,44 @@ public static class MdzArchive
             Errors = errors,
             Warnings = warnings,
         };
+    }
+
+    /// <summary>
+    /// Adds the §6.4 findings for a parsed manifest. Returns false when a critical field is invalid.
+    /// </summary>
+    private static bool CheckManifestInto(
+        JsonObject manifest,
+        IReadOnlyList<string> duplicates,
+        List<string> errors,
+        List<string> warnings)
+    {
+        IReadOnlyList<string> ignored;
+        try
+        {
+            ignored = MdzSpec.CheckManifest(manifest);
+        }
+        catch (InvalidOperationException ex)
+        {
+            errors.Add(ex.Message);
+            return false;
+        }
+
+        foreach (var field in ignored)
+            warnings.Add($"manifest '{field}' has an invalid type or value and is ignored (§6.4).");
+        if (duplicates.Count > 0)
+            warnings.Add($"manifest.json repeats {string.Join(", ", duplicates.Select(d => $"'{d}'"))}; the last of each is used (§6.4).");
+
+        var version = manifest["spec"]?["version"]?.GetValue<string>();
+        if (string.IsNullOrWhiteSpace(version))
+        {
+            warnings.Add("manifest 'spec.version' is missing; version metadata is unavailable.");
+        }
+        else if (int.Parse(version.Split('.')[0], System.Globalization.CultureInfo.InvariantCulture) < MdzSpec.SupportedMajorVersion)
+        {
+            warnings.Add($"manifest 'spec.version' major version {version.Split('.')[0]} is older than supported major {MdzSpec.SupportedMajorVersion}.");
+        }
+
+        return true;
     }
 
     // -------------------------------------------------------------------------
@@ -1441,11 +1428,60 @@ public static class MdzArchive
             .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
+    private static string EntryPath(ZipArchiveEntry entry) => entry.FullName.Replace('\\', '/');
+
+    /// <summary>True for a symbolic link entry: Unix file type <c>S_IFLNK</c> in the external attributes (§4).</summary>
+    private static bool IsSymlink(ZipArchiveEntry entry) => ((entry.ExternalAttributes >> 16) & 0xF000) == 0xA000;
+
+    /// <summary>File entries: no directory entries and no symbolic links (§13.1).</summary>
+    private static IEnumerable<ZipArchiveEntry> FileEntries(ZipArchive archive) =>
+        archive.Entries.Where(e => !IsDirectoryEntry(e) && !IsSymlink(e));
+
+    /// <summary>
+    /// Opens an archive for reading after the container checks every reader applies: encrypted entries
+    /// (<c>ERR_ZIP_ENCRYPTED</c>), compression methods other than 0 and 8 or an unreadable ZIP
+    /// (<c>ERR_ZIP_INVALID</c>, §4), and NFC-duplicate or conflicting entry names
+    /// (<c>ERR_DUPLICATE_PATH</c>, <c>ERR_PATH_CONFLICT</c>, §5.4, §13.1).
+    /// </summary>
+    private static ZipArchive OpenChecked(string archivePath)
+    {
+        if (!File.Exists(archivePath))
+            throw new FileNotFoundException($"Archive '{archivePath}' does not exist.", archivePath);
+
+        try
+        {
+            ScanCentralDirectory(archivePath);
+        }
+        catch (Exception ex) when (ex is IOException or EndOfStreamException or ArgumentException)
+        {
+            throw MdzSpec.Error("ERR_ZIP_INVALID", "The file is not a valid ZIP archive.");
+        }
+
+        ZipArchive archive;
+        try
+        {
+            archive = ZipFile.OpenRead(archivePath);
+        }
+        catch (InvalidDataException ex)
+        {
+            throw MdzSpec.Error("ERR_ZIP_INVALID", $"The file is not a valid ZIP archive ({ex.Message}).");
+        }
+
+        var problem = MdzSpec.EntrySetProblem(archive.Entries.Select(EntryPath));
+        if (problem is not null)
+        {
+            archive.Dispose();
+            throw problem.ToException();
+        }
+
+        return archive;
+    }
+
     private static ArchiveEntry ToArchiveEntry(ZipArchiveEntry entry)
     {
         var isDirectory = IsDirectoryEntry(entry);
         return new ArchiveEntry(
-            entry.FullName.Replace('\\', '/'),
+            EntryPath(entry),
             isDirectory ? 0 : entry.Length,
             isDirectory ? 0 : entry.CompressedLength,
             entry.LastWriteTime.UtcDateTime,
@@ -1454,11 +1490,12 @@ public static class MdzArchive
             !isDirectory && IsImagePath(entry.FullName));
     }
 
+    /// <summary>Finds an entry case-sensitively after NFC (§5.4.1). Symbolic links are never returned.</summary>
     private static ZipArchiveEntry? FindEntry(ZipArchive archive, string path)
     {
-        var normalised = NormaliseArchivePath(path);
+        var normalised = MdzSpec.Nfc(NormaliseArchivePath(path));
         return archive.Entries.FirstOrDefault(e =>
-            e.FullName.Replace('\\', '/').Equals(normalised, StringComparison.OrdinalIgnoreCase));
+            !IsSymlink(e) && string.Equals(MdzSpec.Nfc(EntryPath(e)), normalised, StringComparison.Ordinal));
     }
 
     private static ZipArchiveEntry? FindEntryWithDirectoryFallback(ZipArchive archive, string path)
@@ -1497,7 +1534,7 @@ public static class MdzArchive
     {
         var existing = siblings.FirstOrDefault(node =>
             node.IsDirectory == isDirectory
-            && node.Name.Equals(name, StringComparison.OrdinalIgnoreCase));
+            && MdzSpec.SamePath(node.Name, name));
         if (existing is not null)
             return existing;
 
@@ -1520,101 +1557,8 @@ public static class MdzArchive
             SortTreeNodes(node.Children);
     }
 
-    private static string? ResolveEntryPoint(ZipArchive archive, Manifest? manifest = null)
-    {
-        // 1. manifest.json entryPoint
-        if (manifest?.EntryPoint is { Length: > 0 } ep)
-        {
-            if (IsMarkdownPath(ep) && FindEntry(archive, ep) is not null)
-                return ep;
-        }
-
-        // 2. index.md at archive root
-        if (FindEntry(archive, "index.md") is not null)
-            return "index.md";
-
-        // 3. Exactly one .md/.markdown file at archive root
-        var rootMarkdown = archive.Entries
-            .Where(e => !string.IsNullOrEmpty(e.Name) && !e.FullName.Contains('/'))
-            .Where(e => e.Name.EndsWith(".md", StringComparison.OrdinalIgnoreCase)
-                     || e.Name.EndsWith(".markdown", StringComparison.OrdinalIgnoreCase))
-            .ToList();
-
-        if (rootMarkdown.Count == 1)
-            return rootMarkdown[0].FullName.Replace('\\', '/');
-
-        return null;
-    }
-
-    private static bool IsTextFile(string path)
-    {
-        var ext = Path.GetExtension(path).ToLowerInvariant();
-        return ext is ".md" or ".markdown" or ".json" or ".txt" or ".css" or ".html" or ".htm"
-            or ".xml" or ".svg" or ".yaml" or ".yml" or ".toml";
-    }
-
-    private static void EnsureCreatableEntryPoint(IReadOnlyList<string> archivePaths, Manifest? manifest)
-    {
-        if (manifest?.Mode is not null && !IsSupportedMode(manifest.Mode))
-        {
-            throw new InvalidOperationException(
-                $"Manifest mode '{manifest.Mode}' is not supported. Allowed values are 'document' and 'project'.");
-        }
-
-        if (manifest?.EntryPoint is { Length: > 0 } entryPointFormat
-            && !IsMarkdownPath(entryPointFormat))
-        {
-            throw new InvalidOperationException(
-                $"Manifest entryPoint '{entryPointFormat}' must reference a Markdown file.");
-        }
-
-        if (manifest?.EntryPoint is { Length: > 0 } entryPoint
-            && !archivePaths.Any(path => path.Equals(entryPoint, StringComparison.OrdinalIgnoreCase)))
-        {
-            throw new InvalidOperationException(
-                $"Manifest entryPoint '{entryPoint}' does not exist in the source content.");
-        }
-
-        if (ResolveEntryPoint(archivePaths, manifest) is null)
-        {
-            throw new InvalidOperationException(
-                "No unambiguous entry point could be determined. Add index.md at the archive root, keep exactly one root Markdown file, or set --entry-point.");
-        }
-    }
-
-    private static string? ResolveEntryPoint(IReadOnlyList<string> archivePaths, Manifest? manifest = null)
-    {
-        if (manifest?.EntryPoint is { Length: > 0 } ep
-            && archivePaths.Any(path => path.Equals(ep, StringComparison.OrdinalIgnoreCase)))
-        {
-            if (IsMarkdownPath(ep))
-                return ep;
-        }
-
-        if (archivePaths.Any(path => path.Equals("index.md", StringComparison.OrdinalIgnoreCase)))
-            return "index.md";
-
-        var rootMarkdown = archivePaths
-            .Where(path => !path.Contains('/'))
-            .Where(path => path.EndsWith(".md", StringComparison.OrdinalIgnoreCase)
-                        || path.EndsWith(".markdown", StringComparison.OrdinalIgnoreCase))
-            .ToList();
-
-        if (rootMarkdown.Count == 1)
-            return rootMarkdown[0];
-
-        return null;
-    }
-
-    private static bool TryParseSemVerMajor(string version, out int major)
-    {
-        major = default;
-        var match = SemVerRegex.Match(version);
-        if (!match.Success)
-            return false;
-
-        return int.TryParse(match.Groups["major"].Value, out major);
-    }
+    /// <summary>Files whose line endings a producer normalizes to LF when it writes them (§12.2).</summary>
+    private static bool IsTextFile(string path) => IsMarkdownPath(path) || path == ManifestFileName;
 
     private static string NormaliseLf(string content) =>
         content.Replace("\r\n", "\n").Replace("\r", "\n");
@@ -1628,9 +1572,7 @@ public static class MdzArchive
         || mimeType.Equals("application/xml", StringComparison.OrdinalIgnoreCase)
         || mimeType.Equals("text/xml", StringComparison.OrdinalIgnoreCase);
 
-    private static bool IsMarkdownPath(string path) =>
-        path.EndsWith(".md", StringComparison.OrdinalIgnoreCase)
-        || path.EndsWith(".markdown", StringComparison.OrdinalIgnoreCase);
+    private static bool IsMarkdownPath(string path) => MdzSpec.IsMarkdownPath(path);
 
     private static bool IsImagePath(string path)
     {
@@ -1638,9 +1580,6 @@ public static class MdzArchive
         return extension is "png" or "jpg" or "jpeg" or "gif" or "webp" or "bmp" or "ico"
             or "webm" or "mp4" or "mp3" or "wav" or "ogg";
     }
-
-    private static bool IsSupportedMode(string mode) =>
-        mode is "document" or "project";
 
     private static IReadOnlyList<string> ExtractMarkdownImageReferences(string markdown)
     {
@@ -1718,12 +1657,12 @@ public static class MdzArchive
     }
 
     private static string ResolvePathCase(IEnumerable<string> paths, string candidate) =>
-        paths.First(path => path.Equals(candidate, StringComparison.OrdinalIgnoreCase));
+        MdzSpec.FindPath(paths, candidate) ?? candidate;
 
     private static string GetDocumentTitle(string path, Manifest? manifest)
     {
         if (!string.IsNullOrWhiteSpace(manifest?.EntryPoint)
-            && path.Equals(manifest.EntryPoint, StringComparison.OrdinalIgnoreCase)
+            && MdzSpec.SamePath(path, manifest.EntryPoint.StartsWith("./", StringComparison.Ordinal) ? manifest.EntryPoint[2..] : manifest.EntryPoint)
             && !string.IsNullOrWhiteSpace(manifest.Title))
         {
             return manifest.Title;
@@ -1735,68 +1674,116 @@ public static class MdzArchive
             .Trim();
     }
 
-    private static Manifest? ReadManifestFromArchive(
-        ZipArchive archive,
-        string replacedOrRemovedPath,
-        string? localManifestPath,
-        bool requireValidReplacementManifest,
-        bool requireValidExistingManifest)
+    /// <summary>
+    /// Reads manifest.json as a JSON object (duplicate members: last wins), or null if absent. An
+    /// unreadable manifest throws <c>ERR_MANIFEST_INVALID</c> when <paramref name="requireValid"/>, else
+    /// returns null.
+    /// </summary>
+    private static JsonObject? ReadManifestNode(ZipArchive archive, bool requireValid)
     {
-        if (replacedOrRemovedPath.Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase))
-        {
-            if (localManifestPath is null)
-                return null;
-
-            try
-            {
-                var manifestText = File.ReadAllText(localManifestPath, Encoding.UTF8);
-                using var _ = JsonDocument.Parse(manifestText, StrictJsonDocumentOptions); // Must be strict JSON if manifest.json is present.
-                var manifest = JsonSerializer.Deserialize<Manifest>(manifestText, JsonOptions);
-                if (manifest is null)
-                {
-                    if (requireValidReplacementManifest)
-                        throw new InvalidOperationException("Replacement manifest.json is invalid: expected a JSON object.");
-
-                    return null;
-                }
-
-                return manifest;
-            }
-            catch (JsonException)
-            {
-                if (requireValidReplacementManifest)
-                    throw new InvalidOperationException("Replacement manifest.json is invalid JSON.");
-
-                return null;
-            }
-        }
-
         var manifestEntry = FindEntry(archive, ManifestFileName);
-        if (manifestEntry is null)
+        if (manifestEntry is null || IsDirectoryEntry(manifestEntry))
             return null;
 
         try
         {
-            using var stream = manifestEntry.Open();
-            var manifest = JsonSerializer.Deserialize<Manifest>(stream, JsonOptions);
-            if (manifest is null && requireValidExistingManifest)
-                throw new InvalidOperationException("Existing manifest.json is invalid: expected a JSON object.");
-
-            return manifest;
+            using var reader = new StreamReader(manifestEntry.Open(), Encoding.UTF8);
+            return MdzSpec.ParseManifest(reader.ReadToEnd()).Manifest;
         }
-        catch (JsonException)
+        catch (InvalidOperationException) when (!requireValid)
         {
-            if (requireValidExistingManifest)
-                throw new InvalidOperationException("Existing manifest.json is invalid JSON.");
-
             return null;
         }
     }
 
+    /// <summary>A caller's manifest.json, which must be fully valid (§6.4): a producer doesn't write values a consumer would ignore.</summary>
+    private static JsonObject ReadProvidedManifest(string localPath)
+    {
+        var node = MdzSpec.ParseManifest(File.ReadAllText(localPath, Encoding.UTF8)).Manifest;
+        EnsureWritableManifest(node);
+        return node;
+    }
+
+    /// <summary>
+    /// Checks a manifest a producer is about to write (§6.4, §14.1): critical fields must be valid,
+    /// and so must every descriptive field present. Unknown fields are never checked.
+    /// </summary>
+    private static void EnsureWritableManifest(JsonObject manifest)
+    {
+        var ignored = MdzSpec.CheckManifest(manifest);
+        if (ignored.Count > 0)
+        {
+            throw MdzSpec.Error(
+                "ERR_MANIFEST_INVALID",
+                $"manifest.json has invalid values for {string.Join(", ", ignored.Select(f => $"'{f}'"))} (§6.4)");
+        }
+    }
+
+    /// <summary>
+    /// Fills in what a producer's manifest must or should have (§6.2, §14.1): <c>spec.version</c>,
+    /// timestamps, the resolved <c>entryPoint</c> and <c>mode</c>. Throws when the entry point can't be
+    /// resolved or the manifest is invalid.
+    /// </summary>
+    private static void CompleteProducerManifest(JsonObject manifest, IReadOnlyList<string> archivePaths)
+    {
+        StampManifestNode(manifest, setCreatedIfMissing: true);
+        EnsureWritableManifest(manifest);
+        var entryPoint = MdzSpec.ResolveEntryPoint(archivePaths, manifest);
+        if (!manifest.ContainsKey("entryPoint"))
+            manifest["entryPoint"] = entryPoint;
+        if (!manifest.ContainsKey("mode"))
+            manifest["mode"] = "document";
+    }
+
+    /// <summary>Adds missing <c>spec</c> metadata and refreshes timestamps, keeping each timestamp's form (string or object with <c>when</c>).</summary>
+    private static void StampManifestNode(JsonObject manifest, bool setCreatedIfMissing, bool refreshModified = true)
+    {
+        if (manifest["spec"] is not JsonObject spec)
+            manifest["spec"] = spec = new JsonObject();
+        spec["name"] ??= MdzSpec.SpecName;
+        spec["version"] ??= MdzSpec.SpecVersion;
+
+        var now = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture);
+        if (setCreatedIfMissing && !manifest.ContainsKey("created"))
+            manifest["created"] = now;
+        if (refreshModified)
+        {
+            if (manifest["modified"] is JsonObject modified)
+                modified["when"] = now;
+            else
+                manifest["modified"] = now;
+        }
+    }
+
+    private static JsonObject ManifestToNode(Manifest manifest) =>
+        JsonSerializer.SerializeToNode(manifest, WriteJsonOptions) as JsonObject ?? [];
+
+    private static Manifest NodeToManifest(JsonObject manifest) =>
+        manifest.Deserialize<Manifest>(JsonOptions) ?? new Manifest();
+
+    private static string SerializeManifestNode(JsonObject manifest) =>
+        manifest.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
+
+    /// <summary>Reflects the values a create wrote back onto the caller's manifest object.</summary>
+    private static void CopyManifestValues(JsonObject written, Manifest target)
+    {
+        var result = NodeToManifest(written);
+        target.Spec = result.Spec;
+        target.Created = result.Created;
+        target.Modified = result.Modified;
+        target.EntryPoint = result.EntryPoint;
+        target.Mode = result.Mode;
+    }
+
+    /// <summary>
+    /// Copies an entry unchanged: content, timestamp and external attributes (so a symbolic link stays
+    /// what it was, §14.1).
+    /// </summary>
     private static void CopyEntry(ZipArchiveEntry sourceEntry, ZipArchive destinationArchive)
     {
-        var path = sourceEntry.FullName.Replace('\\', '/');
-        var destinationEntry = destinationArchive.CreateEntry(path, CompressionLevel.Optimal);
+        var destinationEntry = destinationArchive.CreateEntry(EntryPath(sourceEntry), CompressionLevel.Optimal);
+        destinationEntry.LastWriteTime = sourceEntry.LastWriteTime;
+        destinationEntry.ExternalAttributes = sourceEntry.ExternalAttributes;
         using var source = sourceEntry.Open();
         using var destination = destinationEntry.Open();
         source.CopyTo(destination);
@@ -1820,57 +1807,6 @@ public static class MdzArchive
         fileStream.CopyTo(entryStream);
     }
 
-    private static string? ResolveMutationManifestJson(
-        ZipArchive sourceArchive,
-        IReadOnlyDictionary<string, ArchiveWriteSpec> normalizedWrites,
-        IReadOnlyDictionary<string, string> normalizedRemovals,
-        Manifest? manifest)
-    {
-        if (normalizedWrites.TryGetValue(ManifestFileName, out var manifestWrite))
-        {
-            var rawJson = File.ReadAllText(manifestWrite.LocalPath, Encoding.UTF8);
-            return PrepareReplacementManifestJson(rawJson);
-        }
-
-        if (manifest is not null)
-            return SerializeManifest(UpdateManifest(manifest));
-
-        if ((normalizedWrites.Count > 0 || normalizedRemovals.Count > 0)
-            && !normalizedRemovals.ContainsKey(ManifestFileName))
-        {
-            return TryRefreshManifestModifiedJson(sourceArchive);
-        }
-
-        return null;
-    }
-
-    private static Manifest? ResolveMutationManifestForValidation(
-        ZipArchive sourceArchive,
-        string? manifestJson,
-        IReadOnlyDictionary<string, string> normalizedRemovals)
-    {
-        if (manifestJson is not null)
-            return JsonSerializer.Deserialize<Manifest>(manifestJson, JsonOptions);
-
-        if (normalizedRemovals.ContainsKey(ManifestFileName))
-            return null;
-
-        return ReadManifestFromArchive(
-            sourceArchive,
-            replacedOrRemovedPath: string.Empty,
-            localManifestPath: null,
-            requireValidReplacementManifest: false,
-            requireValidExistingManifest: true);
-    }
-
-    private static Manifest? ReadManifestJson(string? manifestJson)
-    {
-        if (manifestJson is null)
-            return null;
-
-        return JsonSerializer.Deserialize<Manifest>(manifestJson, JsonOptions);
-    }
-
     private static Manifest CloneManifest(Manifest manifest)
     {
         var json = JsonSerializer.Serialize(manifest, WriteJsonOptions);
@@ -1886,14 +1822,15 @@ public static class MdzArchive
         options ??= new ManifestUpdateOptions();
 
         manifest.Spec ??= new ManifestSpec();
-        manifest.Spec.Name ??= SpecName;
-        manifest.Spec.Version ??= ProducedSpecVersion;
+        manifest.Spec.Name ??= MdzSpec.SpecName;
+        manifest.Spec.Version ??= MdzSpec.SpecVersion;
 
+        var now = DateTime.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ", System.Globalization.CultureInfo.InvariantCulture);
         if (options.SetCreatedIfMissing && string.IsNullOrWhiteSpace(manifest.Created))
-            manifest.Created = DateTime.UtcNow.ToString("o");
+            manifest.Created = now;
 
         if (options.RefreshModified)
-            manifest.Modified = DateTime.UtcNow.ToString("o");
+            manifest.Modified = now;
     }
 
     private static void ApplyManifestMetadata(Manifest manifest, ManifestEditableMetadata? metadata)
@@ -1917,6 +1854,28 @@ public static class MdzArchive
         if (metadata.EntryPoint is not null) manifest.EntryPoint = metadata.EntryPoint;
     }
 
+    /// <summary>The JSON-level counterpart of <see cref="ApplyManifestMetadata(Manifest, ManifestEditableMetadata?)"/>: other fields are untouched.</summary>
+    private static void ApplyManifestMetadata(JsonObject manifest, ManifestEditableMetadata? metadata)
+    {
+        if (metadata is null)
+            return;
+
+        if (metadata.Title is not null) manifest["title"] = metadata.Title;
+        if (metadata.Author is not null)
+        {
+            manifest["author"] = JsonSerializer.SerializeToNode(metadata.Author, WriteJsonOptions);
+            manifest["authors"] = new JsonArray(JsonSerializer.SerializeToNode(metadata.Author, WriteJsonOptions));
+        }
+        if (metadata.Description is not null) manifest["description"] = metadata.Description;
+        if (metadata.Keywords is not null) manifest["keywords"] = JsonSerializer.SerializeToNode(metadata.Keywords, WriteJsonOptions);
+        if (metadata.Language is not null) manifest["language"] = metadata.Language;
+        if (metadata.License is not null) manifest["license"] = metadata.License;
+        if (metadata.Version is not null) manifest["version"] = metadata.Version;
+        if (metadata.Cover is not null) manifest["cover"] = metadata.Cover;
+        if (metadata.Mode is not null) manifest["mode"] = metadata.Mode;
+        if (metadata.EntryPoint is not null) manifest["entryPoint"] = metadata.EntryPoint;
+    }
+
     private static Manifest? BuildManifestFromOptions(string rootName, MdzPackOptions options)
     {
         var hasManifestOption = options.MapFiles
@@ -1931,31 +1890,17 @@ public static class MdzArchive
         if (!hasManifestOption)
             return null;
 
+        // No default language: an omitted language is unspecified (§6.2).
         return CreateManifest(new ManifestEditableMetadata
         {
             Title = string.IsNullOrWhiteSpace(options.Title) ? rootName : options.Title,
-            Mode = options.Mode,
-            EntryPoint = options.EntryPoint,
-            Language = string.IsNullOrWhiteSpace(options.Language) ? "en" : options.Language,
+            Mode = string.IsNullOrWhiteSpace(options.Mode) ? null : options.Mode,
+            EntryPoint = string.IsNullOrWhiteSpace(options.EntryPoint) ? null : options.EntryPoint,
+            Language = string.IsNullOrWhiteSpace(options.Language) ? null : options.Language,
             Author = string.IsNullOrWhiteSpace(options.Author) ? null : new ManifestAuthor { Name = options.Author },
-            Description = options.Description,
-            Version = options.DocVersion,
+            Description = string.IsNullOrWhiteSpace(options.Description) ? null : options.Description,
+            Version = string.IsNullOrWhiteSpace(options.DocVersion) ? null : options.DocVersion,
         });
-    }
-
-    private static Manifest? ReadProvidedManifest(IEnumerable<MdzSelectedFile> selected)
-    {
-        var manifestFile = selected.FirstOrDefault(file =>
-            file.ArchivePath.Equals(ManifestFileName, StringComparison.OrdinalIgnoreCase));
-        if (manifestFile is null)
-            return null;
-
-        var rawJson = File.ReadAllText(manifestFile.LocalPath, Encoding.UTF8);
-        var validation = ValidateManifest(rawJson);
-        if (!validation.IsValid)
-            throw new InvalidOperationException(string.Join(Environment.NewLine, validation.Errors));
-
-        return JsonSerializer.Deserialize<Manifest>(rawJson, JsonOptions);
     }
 
     private static string BuildGeneratedIndex(IEnumerable<string> markdownPaths, string? title)
@@ -1977,7 +1922,7 @@ public static class MdzArchive
             lines.Add($"- [{fileName}](<{encoded}>)");
         }
 
-        lines.AddRange([string.Empty, "---", string.Empty, "Generated by `mdz-core`", string.Empty, "More info: [markdownzip.org](https://markdownzip.org)"]);
+        lines.AddRange([string.Empty, "---", string.Empty, "Generated by `mdz-core`", string.Empty, "More info: [mdzip.org](https://mdzip.org)"]);
         return string.Join('\n', lines);
     }
 
@@ -2052,35 +1997,6 @@ public static class MdzArchive
         }
     }
 
-    /// <summary>
-    /// Prepares raw manifest JSON for writing: injects spec metadata and refreshes timestamps
-    /// using raw JSON manipulation to preserve fields like created.by / modified.by.
-    /// </summary>
-    private static string PrepareReplacementManifestJson(string rawJson)
-    {
-        var node = JsonNode.Parse(rawJson, nodeOptions: null, documentOptions: StrictJsonDocumentOptions) as JsonObject
-            ?? throw new InvalidOperationException("Replacement manifest.json is invalid: expected a JSON object.");
-
-        if (node["spec"] is not JsonObject specNode)
-        {
-            specNode = [];
-            node["spec"] = specNode;
-        }
-        if (specNode["name"] is null) specNode["name"] = SpecName;
-        if (specNode["version"] is null) specNode["version"] = ProducedSpecVersion;
-
-        if (node["created"] is null)
-            node["created"] = DateTime.UtcNow.ToString("o");
-
-        var now = DateTime.UtcNow.ToString("o");
-        if (node["modified"] is JsonObject modifiedObj)
-            modifiedObj["when"] = now;
-        else
-            node["modified"] = now;
-
-        return node.ToJsonString(new JsonSerializerOptions { WriteIndented = true });
-    }
-
     private static void WriteManifestEntry(ZipArchive archive, string manifestJson)
     {
         var manifestEntry = archive.CreateEntry(ManifestFileName, CompressionLevel.Optimal);
@@ -2088,80 +2004,6 @@ public static class MdzArchive
         var normalised = NormaliseLf(manifestJson);
         var bytes = Encoding.UTF8.GetBytes(normalised);
         stream.Write(bytes, 0, bytes.Length);
-    }
-
-    private static string? TryRefreshManifestModifiedJson(ZipArchive archive)
-    {
-        var manifestEntry = FindEntry(archive, ManifestFileName);
-        if (manifestEntry is null)
-            return null;
-
-        try
-        {
-            using var stream = manifestEntry.Open();
-            using var reader = new StreamReader(stream, Encoding.UTF8);
-            var json = reader.ReadToEnd();
-            var node = JsonNode.Parse(json, nodeOptions: null, documentOptions: StrictJsonDocumentOptions) as JsonObject;
-            if (node is null)
-                return null;
-
-            var now = DateTime.UtcNow.ToString("o");
-            if (node["modified"] is JsonObject modifiedObject)
-            {
-                modifiedObject["when"] = now;
-            }
-            else
-            {
-                node["modified"] = now;
-            }
-
-            // Ensure spec.version is present (required when a conforming producer emits a manifest).
-            if (node["spec"] is not JsonObject specNode)
-            {
-                specNode = [];
-                node["spec"] = specNode;
-            }
-            if (specNode["name"] is null) specNode["name"] = SpecName;
-            if (specNode["version"] is null) specNode["version"] = ProducedSpecVersion;
-
-            return node.ToJsonString(new JsonSerializerOptions
-            {
-                WriteIndented = true,
-            });
-        }
-        catch (JsonException)
-        {
-            return null;
-        }
-    }
-
-    private static void ValidateDraftTimestampField(JsonElement manifestRoot, string fieldName, ICollection<string> errors)
-    {
-        if (!manifestRoot.TryGetProperty(fieldName, out var value))
-            return;
-
-        if (value.ValueKind == JsonValueKind.String)
-            return;
-
-        if (value.ValueKind == JsonValueKind.Object)
-        {
-            if (!value.TryGetProperty("when", out var when)
-                || when.ValueKind != JsonValueKind.String
-                || string.IsNullOrWhiteSpace(when.GetString()))
-            {
-                errors.Add($"ERR_MANIFEST_INVALID: manifest field '{fieldName}' object form must include string property 'when'.");
-            }
-
-            return;
-        }
-
-        if (value.ValueKind == JsonValueKind.Null)
-        {
-            errors.Add($"ERR_MANIFEST_INVALID: manifest field '{fieldName}' must be a string or an object with 'when', not null.");
-            return;
-        }
-
-        errors.Add($"ERR_MANIFEST_INVALID: manifest field '{fieldName}' must be a string or an object with 'when'.");
     }
 
     private static void CreateAtomic(string outputPath, Action<ZipArchive> writeArchive)
@@ -2194,7 +2036,11 @@ public static class MdzArchive
         }
     }
 
-    private static bool IsArchiveEncrypted(string archivePath)
+    /// <summary>
+    /// Reads the central directory directly, for what <see cref="ZipArchive"/> doesn't expose: encrypted
+    /// entries (<c>ERR_ZIP_ENCRYPTED</c>) and compression methods other than 0 and 8 (<c>ERR_ZIP_INVALID</c>, §4).
+    /// </summary>
+    private static void ScanCentralDirectory(string archivePath)
     {
         using var stream = File.OpenRead(archivePath);
         using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: false);
@@ -2206,7 +2052,7 @@ public static class MdzArchive
 
         var scanSize = (int)Math.Min(stream.Length, EocdMinSize + MaxCommentLength);
         if (scanSize < EocdMinSize)
-            return false;
+            return;
 
         var tail = new byte[scanSize];
         stream.Seek(-scanSize, SeekOrigin.End);
@@ -2223,26 +2069,24 @@ public static class MdzArchive
         }
 
         if (eocdOffsetInTail < 0)
-            return false;
+            return;
 
         var centralDirectoryOffset = BitConverter.ToUInt32(tail, eocdOffsetInTail + 16);
         var totalEntries = BitConverter.ToUInt16(tail, eocdOffsetInTail + 10);
+        if (centralDirectoryOffset == 0xFFFFFFFF || totalEntries == 0xFFFF)
+            return; // ZIP64: ZipArchive reads it; nothing more to check here.
 
         stream.Seek(centralDirectoryOffset, SeekOrigin.Begin);
 
         for (var i = 0; i < totalEntries; i++)
         {
             if (reader.ReadUInt32() != CentralDirectoryHeaderSignature)
-                return false;
+                return;
 
             _ = reader.ReadUInt16(); // version made by
             _ = reader.ReadUInt16(); // version needed
             var generalPurposeBitFlag = reader.ReadUInt16();
-
-            if ((generalPurposeBitFlag & 0x0001) != 0)
-                return true;
-
-            _ = reader.ReadUInt16(); // compression method
+            var compressionMethod = reader.ReadUInt16();
             _ = reader.ReadUInt16(); // mod time
             _ = reader.ReadUInt16(); // mod date
             _ = reader.ReadUInt32(); // crc32
@@ -2258,68 +2102,18 @@ public static class MdzArchive
             _ = reader.ReadUInt32(); // external attrs
             _ = reader.ReadUInt32(); // local header offset
 
-            stream.Seek(fileNameLength + extraLength + commentLength, SeekOrigin.Current);
+            var name = Encoding.UTF8.GetString(reader.ReadBytes(fileNameLength));
+            stream.Seek(extraLength + commentLength, SeekOrigin.Current);
+
+            if ((generalPurposeBitFlag & 0x0001) != 0)
+                throw MdzSpec.Error("ERR_ZIP_ENCRYPTED", "Encrypted ZIP entries are not supported.");
+            if (compressionMethod is not 0 and not 8)
+            {
+                throw MdzSpec.Error(
+                    "ERR_ZIP_INVALID",
+                    $"entry '{name}' uses compression method {compressionMethod}; MDZip allows 0 (stored) and 8 (DEFLATE) (§4).");
+            }
         }
-
-        return false;
-    }
-
-    private static ValidationResult ValidateManifest(Manifest? manifest, JsonElement? manifestRoot)
-    {
-        var errors = new List<string>();
-        var warnings = new List<string>();
-
-        if (manifestRoot is { ValueKind: not JsonValueKind.Object })
-        {
-            errors.Add("ERR_MANIFEST_INVALID: manifest.json must be a JSON object.");
-            return new ValidationResult { IsValid = false, Errors = errors, Warnings = warnings };
-        }
-
-        if (manifest is null)
-        {
-            errors.Add("ERR_MANIFEST_INVALID: manifest.json deserialised to null.");
-            return new ValidationResult { IsValid = false, Errors = errors, Warnings = warnings };
-        }
-
-        if (manifestRoot is not null)
-        {
-            ValidateDraftTimestampField(manifestRoot.Value, "created", errors);
-            ValidateDraftTimestampField(manifestRoot.Value, "modified", errors);
-        }
-
-        if (string.IsNullOrWhiteSpace(manifest.Spec?.Version))
-        {
-            warnings.Add("manifest 'spec.version' is missing; version metadata is unavailable.");
-        }
-        else
-        {
-            if (!TryParseSemVerMajor(manifest.Spec.Version, out var major))
-                errors.Add($"ERR_MANIFEST_INVALID: 'spec.version' field '{manifest.Spec.Version}' is not a valid semver string.");
-            else if (major > SupportedMajorVersion)
-                errors.Add($"ERR_VERSION_UNSUPPORTED: manifest 'spec.version' major version {major} is not supported (supported: {SupportedMajorVersion}).");
-            else if (major < SupportedMajorVersion)
-                warnings.Add($"manifest 'spec.version' major version {major} is older than supported major {SupportedMajorVersion}.");
-        }
-
-        if (manifest.Mode is not null && !IsSupportedMode(manifest.Mode))
-            errors.Add($"ERR_MODE_UNSUPPORTED: manifest 'mode' value '{manifest.Mode}' is not supported.");
-
-        if (manifest.Title is not null && string.IsNullOrWhiteSpace(manifest.Title))
-            errors.Add("ERR_MANIFEST_INVALID: manifest field 'title' must not be empty when present.");
-
-        if (manifest.EntryPoint is not null)
-        {
-            var pathError = PathValidator.Validate(manifest.EntryPoint);
-            if (pathError is not null)
-                errors.Add($"ERR_MANIFEST_INVALID: manifest 'entryPoint' must be a valid archive-relative path: {pathError}");
-        }
-
-        return new ValidationResult
-        {
-            IsValid = errors.Count == 0,
-            Errors = errors,
-            Warnings = warnings,
-        };
     }
 }
 

@@ -271,7 +271,7 @@ public class SpecConformanceTests
     }
 
     [Fact]
-    public void Validate_RejectsCreatedObjectWithoutWhen()
+    public void Validate_IgnoresCreatedObjectWithoutWhen()
     {
         var archive = TestFixtureHelper.CreateTempArchive(new Dictionary<string, string>
         {
@@ -287,9 +287,10 @@ public class SpecConformanceTests
 
         try
         {
+            // Spec 1.2.0 §6.4: an invalid descriptive field is ignored and reported, not an error.
             var result = MdzArchive.Validate(archive);
-            Assert.False(result.IsValid);
-            Assert.Contains(result.Errors, e => e.Contains("created", StringComparison.OrdinalIgnoreCase));
+            Assert.True(result.IsValid);
+            Assert.Contains(result.Warnings, w => w.Contains("'created'", StringComparison.Ordinal));
         }
         finally
         {

@@ -15,6 +15,8 @@ public class PathValidationFixtureTests
             Assert.True(
                 isValid == @case.Valid,
                 $"Fixture '{@case.Name}' expected valid={@case.Valid} but got {isValid} for path '{@case.Path}'.");
+            if (!@case.Valid)
+                Assert.Equal(@case.ErrorCode, PathValidator.GetProblem(@case.Path)?.Code);
         }
     }
 

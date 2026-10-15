@@ -75,7 +75,7 @@ public class ValidationParityTests
     }
 
     [Fact]
-    public void ValidateManifest_RawJsonRejectsNonObjectAndTimestampObjectWithoutWhen()
+    public void ValidateManifest_RawJsonRejectsNonObjectAndIgnoresTimestampObjectWithoutWhen()
     {
         var arrayResult = MdzArchive.ValidateManifest("[]");
         Assert.False(arrayResult.IsValid);
@@ -88,7 +88,8 @@ public class ValidationParityTests
           "created": { "by": { "name": "A" } }
         }
         """);
-        Assert.False(timestampResult.IsValid);
-        Assert.Contains(timestampResult.Errors, error => error.Contains("created", StringComparison.OrdinalIgnoreCase));
+        // Spec 1.2.0 §6.4: an invalid descriptive field is ignored (a warning), not an error.
+        Assert.True(timestampResult.IsValid);
+        Assert.Contains(timestampResult.Warnings, warning => warning.Contains("'created'", StringComparison.Ordinal));
     }
 }

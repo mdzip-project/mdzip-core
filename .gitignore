@@ -56,3 +56,6 @@ nunit-*.xml
 mdz_core.slnx
 rename.md
 RELEASE.md
+
+# Visual Studio
+.vs/

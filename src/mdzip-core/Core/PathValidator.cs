@@ -5,61 +5,25 @@ namespace MDZip.Core;
 /// </summary>
 public static class PathValidator
 {
-    // Characters reserved by common operating systems per Section 5.4
-    private static readonly char[] ReservedChars = ['\\', ':', '*', '?', '"', '<', '>', '|'];
+    /// <summary>
+    /// Validates an archive entry path according to Section 5.4 path constraints: not empty, no leading
+    /// slash, no control or OS-reserved characters, no <c>..</c>, empty or <c>.</c> segments. A trailing
+    /// <c>/</c> marks a directory entry. Returns null if valid, or a message describing the violation.
+    /// </summary>
+    public static string? Validate(string path) => GetProblem(path)?.Message;
 
     /// <summary>
-    /// Validates an archive entry path according to Section 5.4 path constraints.
-    /// Returns null if valid, or an error message describing the violation.
+    /// Why <paramref name="path"/> isn't a valid archive entry path (§5.4), with its spec error code
+    /// (<c>ERR_PATH_EMPTY</c>, <c>ERR_PATH_LEADING_SLASH</c>, <c>ERR_PATH_CONTROL_CHAR</c>,
+    /// <c>ERR_PATH_RESERVED_CHAR</c>, <c>ERR_PATH_TRAVERSAL</c> or <c>ERR_PATH_INVALID</c>), or null.
     /// </summary>
-    public static string? Validate(string path)
-    {
-        if (string.IsNullOrEmpty(path))
-            return "Path must not be empty.";
-
-        // MUST NOT begin with a leading slash
-        if (path.StartsWith('/'))
-            return $"Path '{path}' must not begin with a leading slash.";
-
-        // MUST NOT contain path traversal sequences
-        if (ContainsPathTraversal(path))
-            return $"Path '{path}' must not contain path traversal sequences (e.g., '../').";
-
-        // MUST NOT contain null bytes or ASCII control characters (U+0000-U+001F, U+007F)
-        foreach (char c in path)
-        {
-            if (c is '\0' || (c >= '\u0001' && c <= '\u001F') || c == '\u007F')
-                return $"Path '{path}' must not contain null bytes or ASCII control characters.";
-        }
-
-        // MUST NOT contain characters reserved by common operating systems
-        foreach (char reserved in ReservedChars)
-        {
-            if (path.Contains(reserved))
-                return $"Path '{path}' must not contain OS-reserved character '{reserved}'.";
-        }
-
-        return null;
-    }
+    public static MdzProblem? GetProblem(string path) => MdzSpec.PathProblem(path);
 
     /// <summary>
-    /// Returns true if the path contains traversal sequences that could escape the archive root.
+    /// Returns true if the path contains a <c>..</c> segment that could escape the archive root.
     /// </summary>
-    public static bool ContainsPathTraversal(string path)
-    {
-        // Normalise to forward slashes first
-        var normalised = path.Replace('\\', '/');
-
-        // Split on forward slashes and inspect each segment
-        var segments = normalised.Split('/');
-        foreach (var segment in segments)
-        {
-            if (segment == "..")
-                return true;
-        }
-
-        return false;
-    }
+    public static bool ContainsPathTraversal(string path) =>
+        path.Replace('\\', '/').Split('/').Contains("..");
 
     /// <summary>
     /// Returns true if the path is valid according to Section 5.4 constraints.

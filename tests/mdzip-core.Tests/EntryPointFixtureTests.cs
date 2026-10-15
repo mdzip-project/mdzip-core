@@ -5,10 +5,14 @@ namespace MDZip.Core.Tests;
 
 public class EntryPointFixtureTests
 {
-    [Fact]
-    public void ResolveEntryPoint_MatchesFixtureCases()
+    // entrypoint-cases.json is the spec's shared fixture (synced, never edited
+    // here); local-entrypoint-cases.json holds cases specific to this library.
+    [Theory]
+    [InlineData("entrypoint-cases.json")]
+    [InlineData("local-entrypoint-cases.json")]
+    public void ResolveEntryPoint_MatchesFixtureCases(string fixtureFile)
     {
-        var cases = TestFixtureHelper.ReadJsonFixture<List<EntryPointCase>>("entrypoint-cases.json");
+        var cases = TestFixtureHelper.ReadJsonFixture<List<EntryPointCase>>(fixtureFile);
 
         foreach (var @case in cases)
         {
@@ -19,6 +23,14 @@ public class EntryPointFixtureTests
                 Assert.True(
                     string.Equals(resolved, @case.ExpectedEntryPoint, StringComparison.Ordinal),
                     $"Fixture '{@case.Name}' expected '{@case.ExpectedEntryPoint ?? "<null>"}' but got '{resolved ?? "<null>"}'.");
+
+                if (@case.ExpectedError is not null)
+                {
+                    var ex = Assert.ThrowsAny<InvalidOperationException>(() => MdzArchive.ResolveEntryPointStrict(tempArchive));
+                    Assert.True(
+                        MdzSpec.ErrorCode(ex) == @case.ExpectedError,
+                        $"Fixture '{@case.Name}' expected {@case.ExpectedError} but got: {ex.Message}");
+                }
             }
             finally
             {
@@ -29,7 +41,8 @@ public class EntryPointFixtureTests
 
     private static string CreateArchiveForCase(EntryPointCase @case)
     {
-        var entries = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        // Ordinal: the fixtures include names that differ only in case or normalization.
+        var entries = new Dictionary<string, string>(StringComparer.Ordinal);
 
         foreach (var file in @case.Files)
         {
@@ -39,9 +52,14 @@ public class EntryPointFixtureTests
                 : "fixture";
         }
 
-        if (@case.Manifest is not null)
+        // A malformed manifest is given as raw text in `manifestJson` (with `manifest: null`).
+        if (@case.ManifestJson is not null)
         {
-            entries["manifest.json"] = JsonSerializer.Serialize(@case.Manifest);
+            entries["manifest.json"] = @case.ManifestJson;
+        }
+        else if (@case.Manifest is { ValueKind: not JsonValueKind.Null } manifest)
+        {
+            entries["manifest.json"] = JsonSerializer.Serialize(manifest);
         }
 
         return TestFixtureHelper.CreateTempArchive(entries);
@@ -51,5 +69,7 @@ public class EntryPointFixtureTests
         string Name,
         List<string> Files,
         JsonElement? Manifest,
-        string? ExpectedEntryPoint);
+        string? ManifestJson,
+        string? ExpectedEntryPoint,
+        string? ExpectedError);
 }
