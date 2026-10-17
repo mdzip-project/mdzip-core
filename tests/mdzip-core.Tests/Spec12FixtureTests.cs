@@ -410,4 +410,38 @@ public class Spec12FixtureTests
             File.Delete(two);
         }
     }
+
+    [Fact]
+    public void Modifying_RecordsTheEntryPoint_InAManifestThatLacksOne()
+    {
+        var archive = TestFixtureHelper.CreateTempArchive(new Dictionary<string, string>
+        {
+            ["notes.md"] = "# Notes\n",
+            ["manifest.json"] = """{"title": "t", "x-tool": 1}""",
+        });
+        var two = TestFixtureHelper.CreateTempArchive(new Dictionary<string, string>
+        {
+            ["index.md"] = "# I\n",
+            ["a.md"] = "# A\n",
+            ["b.md"] = "# B\n",
+            ["manifest.json"] = """{"title": "t"}""",
+        });
+        try
+        {
+            // Adding a second root Markdown file would make discovery ambiguous; the entry point stays put (§14.1).
+            MdzArchive.AddFile(archive, "other.md", TempFile("# Other\n"));
+            Assert.Equal("notes.md", MdzArchive.ReadManifest(archive)!.EntryPoint);
+            Assert.Equal("notes.md", MdzArchive.ResolveEntryPoint(archive));
+            Assert.True(JsonNode.Parse(MdzArchive.ReadText(archive, "manifest.json"))!["x-tool"] is not null);
+
+            // Removing the entry file doesn't record a name that's gone.
+            var ex = Assert.ThrowsAny<InvalidOperationException>(() => MdzArchive.RemoveFile(two, "index.md"));
+            Assert.Equal("ERR_ENTRYPOINT_UNRESOLVED", MdzSpec.ErrorCode(ex));
+        }
+        finally
+        {
+            File.Delete(archive);
+            File.Delete(two);
+        }
+    }
 }

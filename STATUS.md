@@ -1,5 +1,5 @@
-Status: awaiting-test
-Last:   Branch feat/spec-1.2: MDZip.Core 2.0.0 implements spec 1.2.0 (#3), all v1.2.0 fixtures, 83/83 net8+net10 — not committed
+﻿Status: idle
+Last:   Committed v2.0.1 (UpdateFiles/UpdateManifest record entryPoint in a manifest that lacks one; 84/84); tag v2.0.1 publishes to NuGet
 
 Owner to-do (review/commit/release steps): ../planning/owner-todo.md
 

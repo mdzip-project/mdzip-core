@@ -1,5 +1,14 @@
 # Changelog
 
+## [2.0.1] - 2026-10-14
+
+### Fixed
+- `UpdateFiles` (and so `AddFile`/`RemoveFile`) and `UpdateManifest` now record the current
+  entry point in a manifest that has no `entryPoint`. Before, adding a second root Markdown
+  file to such an archive failed with `ERR_ENTRYPOINT_UNRESOLVED`, because discovery became
+  ambiguous (§14.1: producers write `entryPoint`; a modification keeps the entry point on the
+  same file).
+
 ## [2.0.0] - 2026-10-14
 
 Implements MDZip spec **1.2.0** (issue #3) and runs all of its shared fixtures,

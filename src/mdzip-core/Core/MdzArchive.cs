@@ -499,9 +499,15 @@ public static class MdzArchive
                 else
                 {
                     manifestNode = ManifestToNode(CreateManifest());
-                    if (entryPointBefore is not null && !normalizedRemovals.ContainsKey(MdzSpec.Nfc(entryPointBefore)))
-                        manifestNode["entryPoint"] = entryPointBefore;
                 }
+            }
+
+            // Producers MUST write entryPoint (§14.1). A manifest that doesn't name one records the file
+            // the archive opened at, so adding another root Markdown file can't make discovery ambiguous.
+            if (manifestNode is not null && !manifestNode.ContainsKey("entryPoint") && entryPointBefore is not null
+                && !normalizedRemovals.ContainsKey(MdzSpec.Nfc(entryPointBefore)))
+            {
+                manifestNode["entryPoint"] = entryPointBefore;
             }
 
             var nextPaths = existingPaths
@@ -774,7 +780,7 @@ public static class MdzArchive
             var entryPointBefore = MdzSpec.TryResolveEntryPoint(archivePaths, existing);
 
             var node = existing ?? ManifestToNode(CreateManifest());
-            if (existing is null && entryPointBefore is not null)
+            if (!node.ContainsKey("entryPoint") && entryPointBefore is not null)
                 node["entryPoint"] = entryPointBefore;
             ApplyManifestMetadata(node, metadata);
             StampManifestNode(node, options.SetCreatedIfMissing, options.RefreshModified);
