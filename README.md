@@ -60,23 +60,61 @@ MdzArchive.Extract("book.mdz", "out");
 ```
 
 ## Public API
-`MdzArchive`:
-- `Create(string outputPath, string sourceDirectory, Manifest? manifest = null)`
-- `CreateFromFiles(string outputPath, IEnumerable<(string ArchivePath, string LocalPath)> files, Manifest? manifest = null)`
-- `AddFile(string archivePath, string archiveEntryPath, string localFilePath)`
-- `RemoveFile(string archivePath, string archiveEntryPath)`
-- `Extract(string archivePath, string destinationDirectory)`
-- `List(string archivePath)`
-- `ListDetailed(string archivePath)`
-- `ReadManifest(string archivePath)`
-- `ResolveEntryPoint(string archivePath)`
-- `Validate(string archivePath)`
+All methods are static on `MdzArchive` and take the archive's file path first.
 
-Additional types:
-- `ValidationResult`
-- `ArchiveEntry`
-- `PathValidator`
-- `Manifest`, `ManifestSpec`, `ManifestAuthor`, `ManifestProducer`, `ManifestAgent`, `ManifestFile`
+Read:
+- `ResolveEntryPoint(archivePath)` → the main document's path, or `null`; `ResolveEntryPointStrict(archivePath)` throws with the reason instead
+- `ResolveMode(archivePath)` → `"document"` or `"project"`
+- `ReadManifest(archivePath)`
+- `ReadText(archivePath, entryPath)`, `ReadBytes(...)`, `ReadBase64(...)`, `ReadDataUri(archivePath, entryPath, fallbackMime = null)`
+- `List(archivePath)`, `ListDetailed(archivePath)`, `ListSpecialFiles(archivePath)`, `BuildPathTree(...)`
+- `HasEntry(archivePath, entryPath)`, `FindEntry(...)`, `FindCaseOnlyMatch(...)`
+- `ResolveLink(archivePath, document, link, host = null, archiveHostPath = "archive.mdz", use = "navigate")` (see below)
+- `OpenWorkspace(archivePath, options = null)`: documents and assets as one model, for editors
+- `InferMimeType(path)`, `ClassifyAssetKind(path)`, `IsPreviewableAsset(path)`
+
+Create:
+- `Create(outputPath, sourceDirectory, manifest = null)`
+- `CreateFromFiles(outputPath, files, manifest = null)`: `files` are `(ArchivePath, LocalPath)` pairs
+- `BuildArchive(outputPath, files, rootName, options)`, `BuildWorkspace(outputPath, workspace, options = null)`
+- `CreateManifest(metadata = null)`
+
+Change an existing archive (entries you don't touch and unknown manifest fields are kept):
+- `UpdateFiles(archivePath, writes, removals = null, manifest = null, dropSpecialFiles = false)`: `writes` are `ArchiveWriteSpec(ArchivePath, LocalPath)`
+- `AddFile(archivePath, entryPath, localFilePath)`, `RemoveFile(archivePath, entryPath)`, `RemoveFiles(archivePath, entryPaths)`
+- `UpdateManifest(archivePath, metadata, options = null)`, `SplitManifestMetadata(manifest)`
+- `FindOrphanedAssets(archivePath, options = null)`: images no document uses
+
+Check and extract:
+- `Validate(archivePath)`, `ValidateManifest(manifestJson)`, `GetValidationStatus(result)`
+- `Extract(archivePath, destinationDirectory)`
+
+The spec's rules are public too: `MdzSpec` (paths, entry point, manifest checks, `ErrorCode`) and `MdzLinks.ResolveLink`.
+
+## Show a document with its images
+Image paths are relative to the document that uses them. Resolve each one with `ResolveLink`, using `use: "embed"`:
+
+```csharp
+var entry = MdzArchive.ResolveEntryPointStrict("notes.mdz");
+var markdown = MdzArchive.ReadText("notes.mdz", entry);
+
+// For each image src in the document (Markdown and HTML <img> alike):
+var target = MdzArchive.ResolveLink("notes.mdz", entry, src, use: "embed");
+if (target.Kind == "internal")
+    src = MdzArchive.ReadDataUri("notes.mdz", target.Entry!);
+```
+
+Percent-encoding in `src` (`my%20photo.png`) is decoded for you. `Kind` is one of:
+
+| `Kind` | Meaning | Fields |
+|---|---|---|
+| `internal` | An entry in this archive | `Entry`, `Fragment` |
+| `url` | A URL with a scheme, such as `https:`, `data:` or `mailto:` | |
+| `host` | A file outside the archive (needs a `host` that knows where the archive is) | `Path`, `Fragment` |
+| `archive` | An entry in another `.mdz` (needs a `host`) | `Archive`, `Entry`, `Fragment` |
+| `unresolved` | Not found, invalid (for example `/abs.png`), or outside the trust boundary | `Reason` |
+
+`use` is `"navigate"` (the default) for links the user follows, or `"embed"` for resources the document loads by itself, such as images. Embeds that leave the archive are `unresolved` unless the host allows outside resources (spec §9.6).
 
 ## Spec 1.2.0 behaviour
 
