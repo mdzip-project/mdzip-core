@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [2.1.0] - 2026-10-26
 
 ### Added
 - Built-in ZIP-bomb limits (§13.1, issue #9): opening rejects an archive with more than
