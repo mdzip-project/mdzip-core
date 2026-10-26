@@ -590,9 +590,16 @@ public static class MdzArchive
 
             Directory.CreateDirectory(Path.GetDirectoryName(destPath)!);
 
-            using var entryStream = entry.Open();
-            using var fileStream = File.Create(destPath);
-            entryStream.CopyTo(fileStream);
+            try
+            {
+                using var fileStream = File.Create(destPath);
+                CopyEntryData(entry, fileStream);
+            }
+            catch (InvalidOperationException)
+            {
+                File.Delete(destPath); // never leave a truncated or corrupt file behind
+                throw;
+            }
         }
     }
 
@@ -905,10 +912,7 @@ public static class MdzArchive
     public static string ReadText(string archivePath, string archiveEntryPath)
     {
         using var archive = OpenChecked(archivePath);
-        var entry = GetFileEntryOrThrow(archive, archiveEntryPath);
-        using var stream = entry.Open();
-        using var reader = new StreamReader(stream, Encoding.UTF8);
-        return reader.ReadToEnd();
+        return ReadEntryText(GetFileEntryOrThrow(archive, archiveEntryPath));
     }
 
     /// <summary>
@@ -917,11 +921,7 @@ public static class MdzArchive
     public static byte[] ReadBytes(string archivePath, string archiveEntryPath)
     {
         using var archive = OpenChecked(archivePath);
-        var entry = GetFileEntryOrThrow(archive, archiveEntryPath);
-        using var stream = entry.Open();
-        using var memory = new MemoryStream();
-        stream.CopyTo(memory);
-        return memory.ToArray();
+        return ReadEntryBytes(GetFileEntryOrThrow(archive, archiveEntryPath));
     }
 
     /// <summary>
@@ -1328,8 +1328,7 @@ public static class MdzArchive
                 IReadOnlyList<string> duplicates;
                 try
                 {
-                    using var reader = new StreamReader(manifestEntry.Open(), Encoding.UTF8);
-                    (manifest, duplicates) = MdzSpec.ParseManifest(reader.ReadToEnd());
+                    (manifest, duplicates) = MdzSpec.ParseManifest(ReadEntryText(manifestEntry));
                 }
                 catch (InvalidOperationException ex)
                 {
@@ -1443,6 +1442,130 @@ public static class MdzArchive
     private static IEnumerable<ZipArchiveEntry> FileEntries(ZipArchive archive) =>
         archive.Entries.Where(e => !IsDirectoryEntry(e) && !IsSymlink(e));
 
+    // Built-in resource limits against ZIP bombs (§13.1, core contract R7). Fixed defaults, no looser
+    // than the reference limits of the spec's T-018 fixtures (resource-limit-cases.json).
+
+    /// <summary>Most entries an archive may have.</summary>
+    public const int MaxEntries = 100_000;
+
+    /// <summary>Largest uncompressed size of one entry, in bytes (1 GiB).</summary>
+    public const long MaxEntryUncompressedBytes = 1L << 30;
+
+    /// <summary>Largest total uncompressed size of all entries, in bytes (4 GiB).</summary>
+    public const long MaxTotalUncompressedBytes = 4L << 30;
+
+    /// <summary>Highest uncompressed-to-compressed ratio of an entry larger than 1 MiB.</summary>
+    public const double MaxCompressionRatio = 1000;
+
+    private const long CompressionRatioAppliesAboveBytes = 1L << 20;
+
+    /// <summary>
+    /// Rejects an archive whose declared sizes exceed the built-in limits (<c>ERR_LIMIT_EXCEEDED</c>),
+    /// before anything is decompressed. Actual sizes are checked again while reading
+    /// (<see cref="CopyEntryData"/>), since declared sizes can lie.
+    /// </summary>
+    private static void CheckResourceLimits(ZipArchive archive)
+    {
+        var entries = archive.Entries;
+        if (entries.Count > MaxEntries)
+            throw MdzSpec.Error("ERR_LIMIT_EXCEEDED", $"The archive has {entries.Count} entries (limit {MaxEntries}).");
+
+        long total = 0;
+        foreach (var entry in entries)
+        {
+            if (IsDirectoryEntry(entry))
+                continue;
+            var size = entry.Length;
+            if (size > MaxEntryUncompressedBytes)
+                throw MdzSpec.Error("ERR_LIMIT_EXCEEDED", $"'{EntryPath(entry)}' is {size} bytes (limit {MaxEntryUncompressedBytes}).");
+            if (size > CompressionRatioAppliesAboveBytes && entry.CompressedLength > 0
+                && (double)size / entry.CompressedLength > MaxCompressionRatio)
+                throw MdzSpec.Error("ERR_LIMIT_EXCEEDED",
+                    $"'{EntryPath(entry)}' has compression ratio {(double)size / entry.CompressedLength:F0}:1 (limit {MaxCompressionRatio:F0}:1).");
+            total += size;
+            if (total > MaxTotalUncompressedBytes)
+                throw MdzSpec.Error("ERR_LIMIT_EXCEEDED", $"The archive's total uncompressed size exceeds {MaxTotalUncompressedBytes} bytes.");
+        }
+    }
+
+    /// <summary>
+    /// Copies an entry's data to <paramref name="destination"/>, reading no further than its declared
+    /// size. Data that runs past that size is <c>ERR_LIMIT_EXCEEDED</c>; data that is shorter, fails its
+    /// CRC-32 or won't decompress is <c>ERR_ZIP_INVALID</c>. Never returns corrupt data as success.
+    /// </summary>
+    private static void CopyEntryData(ZipArchiveEntry entry, Stream destination)
+    {
+        var expected = entry.Length;
+        var buffer = new byte[81920];
+        long read = 0;
+        var crc = Crc32.Start;
+        try
+        {
+            using var stream = entry.Open();
+            int n;
+            while ((n = stream.Read(buffer, 0, (int)Math.Min(buffer.Length, expected - read + 1))) > 0)
+            {
+                read += n;
+                if (read > expected)
+                    throw MdzSpec.Error("ERR_LIMIT_EXCEEDED", $"'{EntryPath(entry)}' decompresses to more than its declared size.");
+                crc = Crc32.Update(crc, buffer, n);
+                destination.Write(buffer, 0, n);
+            }
+        }
+        catch (InvalidDataException ex)
+        {
+            throw MdzSpec.Error("ERR_ZIP_INVALID", $"'{EntryPath(entry)}' is corrupt ({ex.Message}).");
+        }
+
+        if (read != expected || Crc32.Finish(crc) != entry.Crc32)
+            throw MdzSpec.Error("ERR_ZIP_INVALID", $"'{EntryPath(entry)}' is corrupt: its data doesn't match its declared size or checksum.");
+    }
+
+    /// <summary>An entry's bytes, checked as <see cref="CopyEntryData"/> describes.</summary>
+    private static byte[] ReadEntryBytes(ZipArchiveEntry entry)
+    {
+        using var memory = new MemoryStream((int)Math.Min(entry.Length, MaxEntryUncompressedBytes));
+        CopyEntryData(entry, memory);
+        return memory.ToArray();
+    }
+
+    /// <summary>An entry's UTF-8 text (a leading BOM is dropped), checked as <see cref="CopyEntryData"/> describes.</summary>
+    private static string ReadEntryText(ZipArchiveEntry entry)
+    {
+        using var reader = new StreamReader(new MemoryStream(ReadEntryBytes(entry)), Encoding.UTF8);
+        return reader.ReadToEnd();
+    }
+
+    /// <summary>CRC-32 (ISO-HDLC, as ZIP uses), so reads can be verified without another package.</summary>
+    private static class Crc32
+    {
+        private static readonly uint[] Table = BuildTable();
+
+        public const uint Start = 0xFFFFFFFF;
+
+        public static uint Update(uint crc, byte[] data, int count)
+        {
+            for (var i = 0; i < count; i++)
+                crc = Table[(crc ^ data[i]) & 0xFF] ^ (crc >> 8);
+            return crc;
+        }
+
+        public static uint Finish(uint crc) => crc ^ 0xFFFFFFFF;
+
+        private static uint[] BuildTable()
+        {
+            var table = new uint[256];
+            for (uint i = 0; i < 256; i++)
+            {
+                var c = i;
+                for (var k = 0; k < 8; k++)
+                    c = (c & 1) != 0 ? 0xEDB88320 ^ (c >> 1) : c >> 1;
+                table[i] = c;
+            }
+            return table;
+        }
+    }
+
     /// <summary>
     /// Opens an archive for reading after the container checks every reader applies: encrypted entries
     /// (<c>ERR_ZIP_ENCRYPTED</c>), compression methods other than 0 and 8 or an unreadable ZIP
@@ -1478,6 +1601,16 @@ public static class MdzArchive
         {
             archive.Dispose();
             throw problem.ToException();
+        }
+
+        try
+        {
+            CheckResourceLimits(archive);
+        }
+        catch
+        {
+            archive.Dispose();
+            throw;
         }
 
         return archive;
@@ -1693,8 +1826,7 @@ public static class MdzArchive
 
         try
         {
-            using var reader = new StreamReader(manifestEntry.Open(), Encoding.UTF8);
-            return MdzSpec.ParseManifest(reader.ReadToEnd()).Manifest;
+            return MdzSpec.ParseManifest(ReadEntryText(manifestEntry)).Manifest;
         }
         catch (InvalidOperationException) when (!requireValid)
         {
@@ -1790,9 +1922,8 @@ public static class MdzArchive
         var destinationEntry = destinationArchive.CreateEntry(EntryPath(sourceEntry), CompressionLevel.Optimal);
         destinationEntry.LastWriteTime = sourceEntry.LastWriteTime;
         destinationEntry.ExternalAttributes = sourceEntry.ExternalAttributes;
-        using var source = sourceEntry.Open();
         using var destination = destinationEntry.Open();
-        source.CopyTo(destination);
+        CopyEntryData(sourceEntry, destination); // a corrupt source fails the update, never copies silently
     }
 
     private static void WriteFileEntry(ZipArchive archive, string archivePath, string localFilePath)

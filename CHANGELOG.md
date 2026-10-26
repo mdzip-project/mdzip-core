@@ -1,5 +1,23 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+- Built-in ZIP-bomb limits (§13.1, issue #9): opening rejects an archive with more than
+  100,000 entries, an entry over 1 GiB, more than 4 GiB in total, or an entry over 1 MiB
+  compressed more than 1000:1, with `ERR_LIMIT_EXCEEDED`. The limits are public constants on
+  `MdzArchive` (`MaxEntries`, `MaxEntryUncompressedBytes`, `MaxTotalUncompressedBytes`,
+  `MaxCompressionRatio`) and are not configurable.
+- Spec fixtures synced to `v1.2.1`, with tests for T-018 (ZIP-bomb limits).
+
+### Fixed
+- Reading an entry whose declared size was smaller than its data returned the first bytes as
+  if the entry were intact (issue #10). Every read (`ReadText`, `ReadBytes` and the reads built
+  on them, `Extract`, manifest reads and the entry copies in `UpdateFiles`) now stops at the
+  declared size and verifies the CRC-32: data past the declared size is `ERR_LIMIT_EXCEEDED`;
+  short, mismatched or undecompressable data is `ERR_ZIP_INVALID`. `Extract` deletes a file it
+  couldn't write completely.
+
 ## [2.0.1] - 2026-10-14
 
 ### Fixed

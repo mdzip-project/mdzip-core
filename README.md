@@ -118,10 +118,12 @@ Percent-encoding in `src` (`my%20photo.png`) is decoded for you. `Kind` is one o
 
 ## Spec 1.2.0 behaviour
 
-Version 2.0.0 implements MDZip spec [1.2.0](https://github.com/mdzip-project/mdzip-spec/releases/tag/v1.2.0) and runs its shared fixtures (`tests/mdzip-core.Tests/Fixtures`, synced with `mdzip-spec/tools/sync-fixtures.mjs --ref v1.2.0`). Things to know when upgrading from 1.x:
+Version 2.0.0 implements MDZip spec [1.2.0](https://github.com/mdzip-project/mdzip-spec/releases/tag/v1.2.0) and runs its shared fixtures (`tests/mdzip-core.Tests/Fixtures`, synced with `mdzip-spec/tools/sync-fixtures.mjs --ref v1.2.1`). Things to know when upgrading from 1.x:
 
 - **Paths are case-sensitive** after Unicode NFC normalization (§5.4.1): `Index.md` no longer finds `index.md`. `MdzArchive.FindCaseOnlyMatch` suggests the near match after a failed lookup.
 - **Every read checks the container first**: encrypted entries (`ERR_ZIP_ENCRYPTED`), compression methods other than stored/DEFLATE (`ERR_ZIP_INVALID`), two entries equal after NFC (`ERR_DUPLICATE_PATH`) and a file that is also a directory (`ERR_PATH_CONFLICT`) throw.
+- **ZIP-bomb limits** (§13.1): opening rejects an archive with more than `MdzArchive.MaxEntries` (100,000) entries, an entry over `MaxEntryUncompressedBytes` (1 GiB), more than `MaxTotalUncompressedBytes` (4 GiB) in total, or an entry over 1 MiB compressed more than `MaxCompressionRatio` (1000:1), with `ERR_LIMIT_EXCEEDED`. The limits are fixed.
+- **Reads are verified**: every read, extraction and update copy stops at the entry's declared size and checks its CRC-32. Data that runs past the declared size is `ERR_LIMIT_EXCEEDED`; data that is short, fails the checksum or won't decompress is `ERR_ZIP_INVALID`. Extraction deletes a file it couldn't write completely.
 - **Symbolic link entries** are skipped and never followed: they're not listed, can't be read or extracted, are listed by `ListSpecialFiles` and reported by `Validate`. Mutations keep them unless `dropSpecialFiles: true`.
 - **Entry point** (§5.5): `manifest.entryPoint` (invalid → `ERR_ENTRYPOINT_INVALID`, missing file → `ERR_ENTRYPOINT_MISSING`, never a fallback); else root `index.md`; else the single root Markdown file once support files (README, AGENTS, LICENSE, CHANGELOG, CONTRIBUTING) are set aside. `ResolveEntryPoint` returns null when there is none; `ResolveEntryPointStrict` says why.
 - **Manifests** (§6.4): an invalid critical field (`spec`, `spec.version`, `mode`, `entryPoint`) is an error; an invalid descriptive field is ignored — left out of `ReadManifest` and reported as a `Validate` warning. `null` counts as a wrong type.
